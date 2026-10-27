@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="660" viewBox="0 0 1200 660" font-family="Segoe UI, Roboto, Helvetica, Arial, sans-serif">
+  <title>claude-remote-ops: задача с телефона выполняется в Claude Code на ПК</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#111B2E"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#6AB3F3"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="660" rx="18" fill="url(#bg)"/>
+
+  <!-- phone -->
+  <rect x="40" y="28" width="410" height="604" rx="38" fill="#05080D" stroke="#2A3646" stroke-width="2"/>
+  <rect x="54" y="42" width="382" height="576" rx="28" fill="#0E1621"/>
+  <rect x="54" y="42" width="382" height="62" rx="28" fill="#17212B"/>
+  <rect x="54" y="80" width="382" height="24" fill="#17212B"/>
+  <circle cx="92" cy="73" r="17" fill="#3A6EA5"/>
+  <text x="92" y="79" font-size="16" fill="#FFFFFF" text-anchor="middle" font-weight="600">C</text>
+  <text x="120" y="68" font-size="15" fill="#F5F5F5" font-weight="600">claude-remote-ops</text>
+  <text x="120" y="87" font-size="12" fill="#7F91A4">бот · только для ADMIN_USER_ID</text>
+
+  <!-- user task -->
+  <rect x="176" y="122" width="244" height="58" rx="14" fill="#2B5278"/>
+  <text font-size="13" fill="#F5F5F5"><tspan x="190" y="146">Почини падающий тест в</tspan><tspan x="190" y="166">tests/test_api.py и прогони pytest</tspan></text>
+
+  <!-- live status -->
+  <rect x="70" y="194" width="350" height="118" rx="14" fill="#182533"/>
+  <text font-size="13" fill="#F5F5F5">
+    <tspan x="84" y="218" font-weight="700">⚙️ Claude работает · ⏱ 0:42</tspan>
+    <tspan x="84" y="240">▶️ Сейчас: ⚙️ Выполнение команды: pytest -q</tspan>
+    <tspan x="84" y="262" fill="#9FB3C8">• 📝 Редактирование файла api/dates.py</tspan>
+    <tspan x="84" y="284" fill="#9FB3C8">👣 Шагов: 6 · 🔧 Инструментов: 4 · 📝 Файлов: 1</tspan>
+  </text>
+  <text x="84" y="303" font-size="11" fill="#7F91A4">карточка обновляется каждые 3 с</text>
+  <rect x="70" y="318" width="350" height="34" rx="10" fill="#22303F"/>
+  <text x="245" y="340" font-size="13" fill="#6AB3F3" text-anchor="middle">🛑 Остановить процесс</text>
+
+  <!-- result -->
+  <rect x="70" y="366" width="350" height="112" rx="14" fill="#182533"/>
+  <text font-size="13" fill="#F5F5F5">
+    <tspan x="84" y="390" font-weight="700">✅ Готово · ⏱ 1:18</tspan>
+    <tspan x="84" y="412">Сравнение дат шло без часового пояса.</tspan>
+    <tspan x="84" y="432">Исправил api/dates.py: 14 passed.</tspan>
+  </text>
+  <text x="84" y="460" font-size="12" fill="#7F91A4">💵 $0.21 · 🔁 Ходов: 9 · 📝 Файлов: 1</text>
+  <rect x="70" y="484" width="350" height="34" rx="10" fill="#22303F"/>
+  <text x="245" y="506" font-size="13" fill="#6AB3F3" text-anchor="middle">📥 Скачать измененные файлы (1)</text>
+
+  <!-- voice -->
+  <rect x="236" y="534" width="184" height="44" rx="14" fill="#2B5278"/>
+  <circle cx="258" cy="556" r="12" fill="#6AB3F3"/>
+  <path d="M254 550 L264 556 L254 562 Z" fill="#2B5278"/>
+  <g fill="#9CC4EC">
+    <rect x="278" y="551" width="3" height="10" rx="1.5"/><rect x="284" y="546" width="3" height="20" rx="1.5"/>
+    <rect x="290" y="549" width="3" height="14" rx="1.5"/><rect x="296" y="543" width="3" height="26" rx="1.5"/>
+    <rect x="302" y="548" width="3" height="16" rx="1.5"/><rect x="308" y="552" width="3" height="8" rx="1.5"/>
+    <rect x="314" y="546" width="3" height="20" rx="1.5"/><rect x="320" y="550" width="3" height="12" rx="1.5"/>
+    <rect x="326" y="553" width="3" height="6" rx="1.5"/><rect x="332" y="549" width="3" height="14" rx="1.5"/>
+  </g>
+  <text x="400" y="561" font-size="12" fill="#9CC4EC" text-anchor="end">0:07</text>
+  <rect x="70" y="586" width="290" height="24" rx="10" fill="#182533"/>
+  <text x="84" y="603" font-size="12" fill="#F5F5F5">🎙 Распознанный запрос → тот же чат</text>
+
+  <!-- arrows phone <-> pc -->
+  <path d="M462 236 C 520 236, 520 236, 572 236" stroke="#6AB3F3" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="517" y="224" font-size="12" fill="#9FB3C8" text-anchor="middle">задача</text>
+  <path d="M572 420 C 520 420, 520 420, 462 420" stroke="#6AB3F3" stroke-width="2.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="517" y="408" font-size="12" fill="#9FB3C8" text-anchor="middle">статус, ответ</text>
+
+  <!-- pc -->
+  <text x="590" y="66" font-size="13" fill="#7F91A4" letter-spacing="2">ВАШ ПК · WINDOWS</text>
+  <rect x="590" y="82" width="570" height="300" rx="12" fill="#0A0F18" stroke="#2A3646" stroke-width="1.5"/>
+  <circle cx="612" cy="102" r="5" fill="#E06C75"/><circle cx="630" cy="102" r="5" fill="#E5C07B"/><circle cx="648" cy="102" r="5" fill="#98C379"/>
+  <text x="672" y="107" font-size="12" fill="#7F91A4" font-family="Consolas, Menlo, monospace">claude.exe · cwd = рабочая папка из ALLOWED_DIRS</text>
+  <g font-family="Consolas, Menlo, monospace" font-size="13">
+    <text x="610" y="142" fill="#98C379">&gt; claude -p --output-format stream-json --verbose</text>
+    <text x="610" y="162" fill="#98C379">    --resume 4c45f474 --dangerously-skip-permissions</text>
+    <text x="610" y="182" fill="#7F91A4">  (промпт передается через stdin)</text>
+    <text x="610" y="214" fill="#C9D4E0">{"type":"system","subtype":"init","model":...}</text>
+    <text x="610" y="236" fill="#C9D4E0">{"type":"assistant","content":[{"type":"tool_use",</text>
+    <text x="610" y="256" fill="#C9D4E0">  "name":"Bash","input":{"command":"pytest -q"}}]}</text>
+    <text x="610" y="278" fill="#C9D4E0">{"type":"user","content":[{"type":"tool_result"...}]}</text>
+    <text x="610" y="300" fill="#C9D4E0">{"type":"result","total_cost_usd":0.21,"num_turns":9}</text>
+    <text x="610" y="338" fill="#E5C07B">🛑 → taskkill /F /T /PID &lt;pid&gt;</text>
+    <text x="610" y="360" fill="#7F91A4">жесткий таймаут CLAUDE_TIMEOUT_SEC</text>
+  </g>
+
+  <!-- pipeline chips -->
+  <g font-size="12" text-anchor="middle">
+    <rect x="590" y="404" width="128" height="52" rx="10" fill="#14243A" stroke="#3A6EA5"/>
+    <text x="654" y="426" fill="#F5F5F5" font-weight="600">AuthMiddleware</text>
+    <text x="654" y="444" fill="#9FB3C8">только админ</text>
+    <rect x="738" y="404" width="128" height="52" rx="10" fill="#14243A" stroke="#3A6EA5"/>
+    <text x="802" y="426" fill="#F5F5F5" font-weight="600">claude_runner</text>
+    <text x="802" y="444" fill="#9FB3C8">stream-json</text>
+    <rect x="886" y="404" width="128" height="52" rx="10" fill="#14243A" stroke="#3A6EA5"/>
+    <text x="950" y="426" fill="#F5F5F5" font-weight="600">SafePathManager</text>
+    <text x="950" y="444" fill="#9FB3C8">песочница путей</text>
+    <rect x="1034" y="404" width="126" height="52" rx="10" fill="#14243A" stroke="#3A6EA5"/>
+    <text x="1097" y="426" fill="#F5F5F5" font-weight="600">faster-whisper</text>
+    <text x="1097" y="444" fill="#9FB3C8">голос → текст</text>
+  </g>
+
+  <rect x="590" y="476" width="570" height="142" rx="12" fill="#101A2A" stroke="#2A3646"/>
+  <text x="610" y="502" font-size="13" fill="#7F91A4" letter-spacing="2">👁 АВТО-ОТЧЕТЫ</text>
+  <text font-size="13" fill="#C9D4E0">
+    <tspan x="610" y="528">Работаете в терминале за ПК? watchdog следит за</tspan>
+    <tspan x="610" y="548">~/.claude/projects и через 30 с тишины присылает отчет:</tspan>
+    <tspan x="610" y="568">запрос, затронутые файлы, команды, итог и стоимость.</tspan>
+  </text>
+  <text x="610" y="600" font-size="11" fill="#5F7389">Иллюстрация интерфейса: сообщения и кнопки как в боте, данные примера условные.</text>
+</svg>

@@ -1,0 +1,19 @@
+# secrets and local state
+.env
+.env.*
+!.env.example
+data/
+logs/
+
+# python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# editors and OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
