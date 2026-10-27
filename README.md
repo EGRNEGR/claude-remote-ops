@@ -35,24 +35,33 @@ Claude Code работает в терминале на вашем компью�
 ## Как это работает
 
 ```mermaid
-flowchart LR
-    phone["📱 Telegram<br/>ваш телефон"] -->|Bot API| auth
+flowchart TB
+    phone["📱 Telegram на вашем телефоне"]
 
     subgraph pc["💻 Ваш ПК с Windows"]
-        direction LR
-        auth["AuthMiddleware<br/>только ADMIN_USER_ID"] --> handlers["Хендлеры aiogram<br/>sessions · runner · files<br/>voice · delivery"]
-        handlers --> runner["claude_runner<br/>подпроцесс + stream-json"]
-        handlers --> fm["SafePathManager<br/>песочница ALLOWED_DIRS"]
-        handlers --> stt["transcriber<br/>faster-whisper"]
-        runner -->|"stdin: промпт"| cli["claude.exe<br/>Claude Code CLI"]
+        direction TB
+        auth["AuthMiddleware<br/>только ADMIN_USER_ID"]
+        handlers["Хендлеры aiogram<br/>sessions · runner · files · voice · delivery"]
+        runner["claude_runner<br/>подпроцесс + stream-json"]
+        fm["SafePathManager<br/>песочница ALLOWED_DIRS"]
+        stt["transcriber<br/>faster-whisper"]
+        cli["claude.exe<br/>Claude Code CLI"]
+        hist[("~/.claude/projects<br/>история *.jsonl")]
+        parser["session_parser<br/>отчеты по сессиям"]
+        watcher["watcher<br/>watchdog + пауза 30 с"]
+
+        auth --> handlers
+        handlers --> runner & fm & stt
+        runner -->|"stdin: промпт"| cli
         cli -->|"stdout: события JSON"| runner
-        cli -->|пишет историю| hist[("~/.claude/projects<br/>*.jsonl")]
-        hist --> parser["session_parser<br/>отчеты"]
-        hist -. "изменения файлов" .-> watcher["watcher<br/>watchdog + пауза 30 с"]
+        cli -->|пишет историю| hist
+        hist --> parser
+        hist -. изменения .-> watcher
         parser --> handlers
         watcher -->|пуш-отчет| handlers
     end
 
+    phone -->|Bot API| auth
     handlers -->|"статус, ответ, файлы"| phone
 ```
 
