@@ -10,6 +10,8 @@ from typing import Annotated, Literal
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from src.services.reasoning import MODEL_DEFAULT, ReasoningEffort, normalize_model, parse_effort
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Used only when skip-permissions is switched off in /mode. `mcp__*` covers every MCP server.
@@ -66,7 +68,9 @@ class Settings(BaseSettings):
     # None (0 or empty in .env) = the flag is not passed to the CLI at all, i.e. no limit.
     CLAUDE_MAX_TURNS: int | None = Field(default=None, gt=0, le=10_000)
     CLAUDE_MAX_BUDGET_USD: float | None = Field(default=None, gt=0)
-    CLAUDE_MODEL: str = ""
+    # First-run defaults for /model (persisted in state afterwards). default = CLI settings.
+    CLAUDE_MODEL: str = MODEL_DEFAULT
+    CLAUDE_REASONING_EFFORT: ReasoningEffort = ReasoningEffort.DEFAULT
     CLAUDE_TIMEOUT_SEC: int = Field(default=3600, ge=30)
     # Full trust by default: the bot is already locked to ADMIN_USER_ID by AuthMiddleware.
     SKIP_PERMISSIONS_DEFAULT: bool = True
@@ -138,6 +142,16 @@ class Settings(BaseSettings):
         if isinstance(value, (int, float)) and value == 0:
             return None
         return value
+
+    @field_validator("CLAUDE_MODEL", mode="before")
+    @classmethod
+    def _model(cls, value: object) -> str:
+        return normalize_model(value)
+
+    @field_validator("CLAUDE_REASONING_EFFORT", mode="before")
+    @classmethod
+    def _effort(cls, value: object) -> ReasoningEffort:
+        return parse_effort(value)
 
     @field_validator("WHISPER_DOWNLOAD_DIR", mode="before")
     @classmethod

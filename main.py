@@ -18,7 +18,7 @@ from pydantic import ValidationError
 
 from src.config import Settings, get_settings
 from src.context import AppContext, build_context
-from src.handlers import common, files, restart, runner, sessions, voice
+from src.handlers import common, files, model, restart, runner, sessions, voice
 from src.middlewares.auth import AuthMiddleware
 from src.services.session_parser import SessionReport
 from src.services.watcher import SessionWatcher
@@ -37,6 +37,8 @@ BOT_COMMANDS = [
     BotCommand(command="files", description="Файловый менеджер"),
     BotCommand(command="get", description="Найти и скачать файл"),
     BotCommand(command="mode", description="Режим запуска Claude"),
+    BotCommand(command="model", description="Модель и уровень ризонинга"),
+    BotCommand(command="effort", description="Ризонинг: off|low|medium|high|max|auto"),
     BotCommand(command="new", description="Новый чат в рабочей папке"),
     BotCommand(command="continue", description="Продолжить последний чат папки"),
     BotCommand(command="status", description="Состояние и процессы"),
@@ -160,7 +162,9 @@ async def run_bot(settings: Settings) -> int:
     dp["ctx"] = ctx
     dp.update.outer_middleware(AuthMiddleware(settings.ADMIN_USER_ID))
     # Order matters: the runner router holds the catch-all "free text = prompt" handler.
-    dp.include_routers(common.router, restart.router, sessions.router, files.router, voice.router, runner.router)
+    dp.include_routers(
+        common.router, restart.router, model.router, sessions.router, files.router, voice.router, runner.router,
+    )
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     dp.errors.register(on_error)

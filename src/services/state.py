@@ -12,13 +12,15 @@ from pathlib import Path
 
 import aiofiles
 
+from src.services.reasoning import MODEL_DEFAULT, ReasoningEffort, normalize_model, parse_effort
 from src.utils.winpath import long_path, retry_on_lock
 
 log = logging.getLogger(__name__)
 
 # v1: initial format. v2: limit profiles + full-trust default (skip-permissions) applied on upgrade.
 # v3: policy for a chat that is busy in a background session on the PC (BG_SESSION_POLICY on upgrade).
-STATE_SCHEMA_VERSION = 3
+# v4: model and reasoning effort (/model), taken from CLAUDE_MODEL / CLAUDE_REASONING_EFFORT on upgrade.
+STATE_SCHEMA_VERSION = 4
 
 
 class RunMode(StrEnum):
@@ -105,6 +107,8 @@ class BotState:
     watcher_enabled: bool = True
     limit_profile: LimitProfile = LimitProfile.AUTO
     bg_session_policy: BgSessionPolicy = BgSessionPolicy.ASK
+    claude_model: str = MODEL_DEFAULT
+    reasoning_effort: ReasoningEffort = ReasoningEffort.DEFAULT
     schema_version: int = STATE_SCHEMA_VERSION
 
     @classmethod
@@ -124,6 +128,14 @@ class BotState:
             state.bg_session_policy = BgSessionPolicy(str(state.bg_session_policy))
         except ValueError:
             state.bg_session_policy = BgSessionPolicy.ASK
+        try:
+            state.claude_model = normalize_model(state.claude_model)
+        except ValueError:
+            state.claude_model = MODEL_DEFAULT
+        try:
+            state.reasoning_effort = parse_effort(state.reasoning_effort)
+        except ValueError:
+            state.reasoning_effort = ReasoningEffort.DEFAULT
         return state
 
     def to_dict(self) -> dict[str, object]:
@@ -131,6 +143,7 @@ class BotState:
         data["run_mode"] = str(self.run_mode)
         data["limit_profile"] = str(self.limit_profile)
         data["bg_session_policy"] = str(self.bg_session_policy)
+        data["reasoning_effort"] = str(self.reasoning_effort)
         return data
 
 
@@ -170,6 +183,9 @@ class StateStore:
             )
         if stored_version < 3:
             state.bg_session_policy = self._defaults.bg_session_policy
+        if stored_version < 4:
+            state.claude_model = self._defaults.claude_model
+            state.reasoning_effort = self._defaults.reasoning_effort
         state.schema_version = STATE_SCHEMA_VERSION
         self._state = state
         if stored_version < STATE_SCHEMA_VERSION:

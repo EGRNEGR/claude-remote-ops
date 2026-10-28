@@ -48,6 +48,7 @@ from pathlib import Path
 
 from src.config import Settings
 from src.services.mcp_registry import McpRegistry
+from src.services.reasoning import ReasoningEffort, effort_args, effort_env, prompt_for_effort
 from src.services.session_parser import SESSION_ID_RE
 from src.services.state import RunMode
 from src.utils.text import one_line, strip_ansi, truncate, truncate_middle
@@ -115,6 +116,14 @@ class RunRequest:
     max_budget_usd: float | None = None
     # --fork-session with --resume / --continue: a new session id with the full context of the chat.
     fork_session: bool = False
+    # --model value (alias or full name); None = the CLI default model.
+    model: str | None = None
+    reasoning: ReasoningEffort = ReasoningEffort.DEFAULT
+
+    @property
+    def stdin_prompt(self) -> str:
+        """Text written to the CLI stdin (`max` reasoning adds the `ultrathink` keyword)."""
+        return prompt_for_effort(self.prompt, self.reasoning)
 
 
 @dataclass(slots=True)
@@ -446,8 +455,9 @@ class ClaudeRunner:
             args.append("--continue")
         if req.fork_session and req.mode in (RunMode.RESUME, RunMode.CONTINUE):
             args.append("--fork-session")
-        if s.CLAUDE_MODEL.strip():
-            args += ["--model", s.CLAUDE_MODEL.strip()]
+        if req.model:
+            args += ["--model", req.model]
+        args += effort_args(req.reasoning)
         if req.skip_permissions:
             # Full access (any Bash, Skill, MCP server). --allowedTools is NOT passed so that a
             # restrictive list can never narrow the bypass mode.
@@ -460,8 +470,15 @@ class ClaudeRunner:
         return args
 
     @staticmethod
-    def build_env() -> dict[str, str]:
-        env = {k: v for k, v in os.environ.items() if k.upper() not in _PARENT_SESSION_ENV}
+    def build_env(reasoning: ReasoningEffort = ReasoningEffort.DEFAULT) -> dict[str, str]:
+        """Child env: parent-session vars stripped, UTF-8 forced, thinking vars set for the chosen level."""
+        overrides = effort_env(reasoning)
+        owned = {key.upper() for key in overrides}
+        env = {
+            k: v for k, v in os.environ.items()
+            if k.upper() not in _PARENT_SESSION_ENV and k.upper() not in owned
+        }
+        env.update({key: value for key, value in overrides.items() if value is not None})
         env.update({
             "PYTHONIOENCODING": "utf-8",
             "PYTHONUTF8": "1",
@@ -478,13 +495,13 @@ class ClaudeRunner:
             # `mcp__*` is not honoured by the CLI in --allowedTools: expand to mcp__<server> rules.
             tools = await self.mcp.expand(self.settings.CLAUDE_ALLOWED_TOOLS, req.cwd)
         args = self.build_args(req, tools)
-        log.info("Claude args: %s", args)
+        log.info("Claude args: %s (reasoning=%s)", args, req.reasoning)
         common = dict(
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(req.cwd),
-            env=self.build_env(),
+            env=self.build_env(req.reasoning),
             limit=STREAM_LIMIT,
         )
         if self._use_shell:
@@ -632,7 +649,7 @@ class ClaudeRunner:
         self._procs[state.run_id] = proc
         log.info("Run %s started: pid=%s cwd=%s mode=%s", state.run_id, proc.pid, req.cwd, req.mode)
         stderr_task = asyncio.create_task(self._drain_stderr(proc, state))
-        await self._feed_stdin(proc, req.prompt)
+        await self._feed_stdin(proc, req.stdin_prompt)
         reader = asyncio.create_task(self._read_stdout(proc, state, on_update))
         waiter = asyncio.create_task(proc.wait())
         try:

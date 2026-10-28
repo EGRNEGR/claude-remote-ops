@@ -96,6 +96,8 @@ def build_context(settings: Settings) -> AppContext:
         skip_permissions=settings.SKIP_PERMISSIONS_DEFAULT,
         watcher_enabled=settings.WATCH_ON_START,
         bg_session_policy=BgSessionPolicy(settings.BG_SESSION_POLICY),
+        claude_model=settings.CLAUDE_MODEL,
+        reasoning_effort=settings.CLAUDE_REASONING_EFFORT,
     )
     return AppContext(
         settings=settings,

@@ -12,6 +12,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.services.file_manager import EntryInfo
+from src.services.reasoning import EFFORT_BUTTONS, EFFORT_TITLES, MODEL_DEFAULT, MODEL_PRESETS, MODEL_TITLES
 from src.services.session_parser import ProjectInfo, SessionMeta
 from src.services.state import (
     BG_POLICY_TITLES,
@@ -33,6 +34,7 @@ BTN_FILES = "🗂 Файлы"
 BTN_MODE = "⚙️ Режим"
 BTN_STATUS = "📊 Статус"
 BTN_RESTART = "🔄 Перезапустить бота"
+BTN_MODEL = "🧠 Модель и Ризонинг"
 REPLY_BUTTONS = (BTN_SESSIONS, BTN_FILES, BTN_MODE, BTN_STATUS)
 
 
@@ -64,6 +66,11 @@ class RunCb(CallbackData, prefix="rn"):
 
 class ModeCb(CallbackData, prefix="md"):
     action: str  # new | continue | resume | perm_full | perm_restricted | lim_<profile> | bg_<policy> | watch
+
+
+class ModelCb(CallbackData, prefix="ml"):
+    kind: str   # m = model | e = reasoning effort
+    value: str  # sonnet | opus | haiku | default / off | low | medium | high | max | default
 
 
 class UpCb(CallbackData, prefix="up"):
@@ -212,6 +219,7 @@ def mode_kb(state: BotState, watcher_running: bool, env_limits: RunLimits) -> In
     for policy in (BgSessionPolicy.ASK, BgSessionPolicy.FORK):
         mark = "✅ " if state.bg_session_policy == policy else ""
         b.button(text=mark + BG_POLICY_TITLES[policy], callback_data=ModeCb(action=f"bg_{policy.value}"))
+    b.button(text=BTN_MODEL, callback_data=MenuCb(action="model"))
     watch = "ВКЛ" if watcher_running else "ВЫКЛ"
     b.button(text=f"👁 Авто-отчеты (watchdog): {watch}", callback_data=ModeCb(action="watch"))
     b.button(text="📂 Выбрать проект / сессию", callback_data=ProjCb(action="list"))
@@ -275,8 +283,23 @@ def active_runs_kb(run_ids: Sequence[str]) -> InlineKeyboardMarkup | None:
 def status_kb(run_ids: Sequence[str]) -> InlineKeyboardMarkup:
     """/status: kill switches for active runs (or the main menu when idle) + self-restart."""
     rows = [list(row) for row in (active_runs_kb(run_ids) or main_inline_kb()).inline_keyboard]
+    rows.append([InlineKeyboardButton(text=BTN_MODEL, callback_data=MenuCb(action="model").pack())])
     rows.append([InlineKeyboardButton(text=BTN_RESTART, callback_data=MenuCb(action="restart").pack())])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def model_kb(state: BotState) -> InlineKeyboardMarkup:
+    """/model: rows 1-2 model, rows 3-4 reasoning effort; the current choice is marked with ✅."""
+    b = InlineKeyboardBuilder()
+    for model in (*MODEL_PRESETS, MODEL_DEFAULT):
+        mark = "✅ " if state.claude_model == model else ""
+        b.button(text=mark + MODEL_TITLES[model], callback_data=ModelCb(kind="m", value=model))
+    for effort in EFFORT_BUTTONS:
+        mark = "✅ " if state.reasoning_effort == effort else ""
+        b.button(text=mark + EFFORT_TITLES[effort], callback_data=ModelCb(kind="e", value=effort.value))
+    b.button(text=BTN_MODE, callback_data=MenuCb(action="mode"))
+    b.adjust(2, 2, 3, 3, 1)
+    return b.as_markup()
 
 
 def restart_confirm_kb() -> InlineKeyboardMarkup:

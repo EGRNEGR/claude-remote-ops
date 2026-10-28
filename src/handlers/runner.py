@@ -29,6 +29,7 @@ from src.keyboards.inline import (
 )
 from src.services.claude_runner import RunnerBusyError, RunRequest, RunState, RunStatus
 from src.services.file_manager import PathAccessError
+from src.services.reasoning import describe_choice, describe_cli, model_arg
 from src.services.state import (
     BG_POLICY_TITLES,
     RUN_MODE_TITLES,
@@ -81,7 +82,7 @@ def _mode_line(state: RunState) -> str:
     line += " · 🔓 full access" if req.skip_permissions else " · 🔒 restricted"
     limits = RunLimits(req.max_turns, req.max_budget_usd)
     line += " · ♾" if limits.unlimited else f" · 💵 {esc(limits.describe())}"
-    return line
+    return line + "\n" + esc(describe_choice(req.model, req.reasoning, state.model))
 
 
 def render_status(state: RunState) -> str:
@@ -254,6 +255,8 @@ def build_request(
         label=label,
         max_turns=limits.max_turns,
         max_budget_usd=limits.max_budget_usd,
+        model=model_arg(st.claude_model),
+        reasoning=st.reasoning_effort,
     )
 
 
@@ -281,6 +284,8 @@ def build_unrestricted_retry(state: RunState) -> RunRequest:
         label="🔓 повтор без ограничений: " + (req.label or req.prompt),
         max_turns=UNLIMITED.max_turns,
         max_budget_usd=UNLIMITED.max_budget_usd,
+        model=req.model,
+        reasoning=req.reasoning,
     )
 
 
@@ -423,6 +428,7 @@ def render_mode(ctx: AppContext) -> str:
     else:
         lines.append("🔒 Доступ: <b>Restricted Tools</b> (только CLAUDE_ALLOWED_TOOLS)")
     lines.append(f"📏 Лимиты: <b>{esc(limit_profile_title(st.limit_profile, ctx.env_limits()))}</b>")
+    lines.append(f"<b>{esc(describe_choice(st.claude_model, st.reasoning_effort))}</b>")
     lines.append(f"🖥 Если чат занят фоновой сессией на ПК: <b>{esc(BG_POLICY_TITLES[st.bg_session_policy])}</b>")
     watcher_on = ctx.watcher is not None and ctx.watcher.running
     lines.append(f"👁 Авто-отчеты: {'ВКЛ' if watcher_on else 'ВЫКЛ'} (пауза {s.WATCH_DEBOUNCE_SEC:g} с)")
@@ -435,6 +441,7 @@ def render_mode(ctx: AppContext) -> str:
         lines.append("🔧 Флаг: <code>--dangerously-skip-permissions</code> (--allowedTools не передается)")
     else:
         lines.append(f"🔧 allowedTools: <code>{esc_fit(s.CLAUDE_ALLOWED_TOOLS, 400)}</code>")
+    lines.append(f"💭 <code>{esc(describe_cli(st.claude_model, st.reasoning_effort))}</code>")
     return "\n".join(lines)
 
 

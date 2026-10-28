@@ -9,6 +9,7 @@ from aiogram.types import CallbackQuery, Message
 
 from src.context import AppContext
 from src.keyboards.inline import BTN_STATUS, MenuCb, main_inline_kb, main_reply_kb, status_kb
+from src.services.reasoning import describe_choice
 from src.services.state import RUN_MODE_TITLES, limit_profile_title
 from src.utils.text import esc, esc_fit, human_duration
 
@@ -25,6 +26,8 @@ HELP_TEXT = (
     "/files - проводник по разрешенным папкам\n"
     "/get <i>имя или *.маска</i> - найти и скачать файл\n"
     "/mode - режим чата, доступ (Full / Restricted), профиль лимитов, авто-отчеты\n"
+    "/model [имя] - модель (Sonnet / Opus / Haiku) и уровень ризонинга\n"
+    "/effort <i>off|low|medium|high|xhigh|max|auto</i> - глубина размышлений\n"
     "/new [задача] - новый чат в рабочей папке\n"
     "/continue [задача] - продолжить последний чат папки\n"
     "/watch - вкл/выкл авто-отчеты о работе на ПК\n"
@@ -48,6 +51,7 @@ def render_status(ctx: AppContext) -> str:
     access = "🔓 Skip Permissions (Full MCP &amp; Bash)" if st.skip_permissions else "🔒 Restricted Tools"
     lines.append(f"Доступ: {access}")
     lines.append(f"📏 Лимиты: {esc(limit_profile_title(st.limit_profile, ctx.env_limits()))}")
+    lines.append(esc(describe_choice(st.claude_model, st.reasoning_effort)))
     lines.append(f"⏰ Таймаут запуска: {human_duration(ctx.settings.CLAUDE_TIMEOUT_SEC)}")
     watcher_on = ctx.watcher is not None and ctx.watcher.running
     lines.append(f"👁 Авто-отчеты: {'ВКЛ' if watcher_on else 'ВЫКЛ'}")

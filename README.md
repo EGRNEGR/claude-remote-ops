@@ -28,6 +28,7 @@ Claude Code работает в терминале на вашем компью�
 | 📂 **Отчеты по сессиям** | Браузер проектов и сессий из `~/.claude/projects`: запрос, файлы, команды, итог, стоимость, полный отчет `.md` |
 | 👁 **Авто-отчеты** | Поработали в терминале за ПК? Через 30 с тишины бот пришлет сводку по сессии |
 | 🎙 **Голосовые задачи** | Голосовое или аудио распознается локально (faster-whisper, на GPU через CUDA) и выполняется как обычный текст |
+| 🧠 **Модель и ризонинг** | `/model`: Sonnet / Opus / Haiku и глубина размышлений (Выкл … Max) в один клик, выбор сохраняется |
 | 🔄 **Перезапуск с телефона** | `/restart`: новый процесс бота стартует и подтверждает готовность, только потом останавливается старый |
 | 🌿 **Чат занят на ПК** | Сессия открыта в фоне (`claude --bg`)? Бот продолжит ее в копии (`--fork-session`) или остановит фоновую и продолжит здесь |
 | 🗂 **Файловый менеджер** | Проводник, поиск, предпросмотр, скачивание и загрузка файлов внутри разрешенных папок |
@@ -162,6 +163,8 @@ copy .env.example .env   # затем заполните BOT_TOKEN, ADMIN_USER_I
 | `/files` | Файловый менеджер |
 | `/get <имя или *.маска>` | Найти и скачать файл |
 | `/mode` | Режим запуска, доступ и лимиты |
+| `/model [имя]` | Модель и уровень ризонинга (кнопки), `/model sonnet` или полное имя модели |
+| `/effort <уровень>` | Ризонинг: `off`, `low`, `medium`, `high`, `xhigh`, `max`, `auto` |
 | `/new [задача]` | Новый чат в рабочей папке |
 | `/continue [задача]` | Продолжить последний чат папки |
 | `/status` | Состояние бота, запущенные процессы, устройство Whisper |
@@ -213,6 +216,22 @@ Get-CimInstance Win32_Process |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 ```
 
+### Модель и ризонинг: `/model`
+
+Одно меню с двумя блоками кнопок: модель (⚡ Sonnet, 🧠 Opus, 🪶 Haiku, ⚙️ Авто) и уровень размышлений (🚫 Выкл, 🟢 Low, 🟡 Medium, 🟠 High, 🔥 Max, ⚙️ Авто). Нажатие сразу сохраняет выбор в `data/state.json` и перерисовывает то же сообщение. Текущая пара видна в `/status`, `/mode` и в шапке каждого запуска: `🧠 Модель: sonnet · 💭 Ризонинг: low`.
+
+| Уровень | Флаг CLI | Переменные окружения процесса |
+|---|---|---|
+| ⚙️ Авто | нет | не меняются (настройки Claude Code) |
+| 🚫 Выкл | `--effort low` | `MAX_THINKING_TOKENS=0`, `CLAUDE_CODE_DISABLE_THINKING=1` |
+| 🟢 Low | `--effort low` | `MAX_THINKING_TOKENS=4096` |
+| 🟡 Medium | `--effort medium` | `MAX_THINKING_TOKENS=10000` |
+| 🟠 High | `--effort high` | `MAX_THINKING_TOKENS=20000` |
+| XHigh (`/effort xhigh`) | `--effort xhigh` | `MAX_THINKING_TOKENS=24000` |
+| 🔥 Max | `--effort max` | `MAX_THINKING_TOKENS=32000`, к запросу добавляется `ultrathink` |
+
+Флаг и `CLAUDE_CODE_EFFORT_LEVEL` всегда получают одно значение: переменная окружения в Claude Code 2.1.304 перекрывает флаг. Новые модели (Opus и Sonnet 4.6+, семейство 5.x) думают адаптивно и слушают `--effort`, а бюджет `MAX_THINKING_TOKENS` действует на старых (`claude-haiku-4-5`, `claude-sonnet-4-5`), поэтому передается и то и другое. Уровень, которого модель не поддерживает, CLI молча понижает.
+
 ## Настройка
 
 Все параметры с комментариями описаны в [`.env.example`](.env.example). Самые нужные:
@@ -224,7 +243,8 @@ Get-CimInstance Win32_Process |
 | `BG_SESSION_POLICY` | `ask` | чат занят фоновой сессией на ПК: `ask` = кнопки 🌿 / 🛑, `fork` = сразу `--fork-session` |
 | `CLAUDE_TIMEOUT_SEC` | `3600` | жесткий лимит времени одного запуска |
 | `MAX_CONCURRENT_RUNS` | `2` | сколько задач может идти одновременно |
-| `CLAUDE_MODEL` | пусто | модель, пусто = модель из настроек Claude Code |
+| `CLAUDE_MODEL` | `default` | модель при первом запуске (`sonnet`, `opus`, `haiku`, полное имя), дальше `/model` |
+| `CLAUDE_REASONING_EFFORT` | `default` | ризонинг при первом запуске: `off` … `max`, дальше `/model` или `/effort` |
 | `WATCH_ON_START` / `WATCH_DEBOUNCE_SEC` | `true` / `30` | авто-отчеты и пауза перед отчетом |
 | `VOICE_ENABLED` | `true` | распознавание голосовых |
 | `WHISPER_MODEL` | `medium` | `tiny` … `large-v3`, `turbo`; скачивается при первом голосовом |
@@ -288,12 +308,12 @@ claude-remote-ops/
 │   ├── config.py         # настройки на pydantic-settings
 │   ├── context.py        # AppContext: зависимости для хендлеров
 │   ├── middlewares/      # AuthMiddleware
-│   ├── handlers/         # common, sessions, runner, files, voice, restart, delivery
-│   ├── services/         # claude_runner, session_parser, watcher, mcp_registry,
+│   ├── handlers/         # common, sessions, runner, model, files, voice, restart, delivery
+│   ├── services/         # claude_runner, reasoning, session_parser, watcher, mcp_registry,
 │   │                     # transcriber, restarter, file_manager, state
 │   ├── keyboards/        # inline-клавиатуры
 │   └── utils/            # HTML и чанки, пути Windows, токены кнопок, один экземпляр
-├── tests/                # pytest: парсер, песочница, раннер с fake CLI, watcher, голос, GPU, перезапуск, фоновые сессии, сценарий бота
+├── tests/                # pytest: парсер, песочница, раннер с fake CLI, watcher, голос, GPU, перезапуск, фоновые сессии, модель и ризонинг, сценарий бота
 └── docs/demo.svg
 ```
 

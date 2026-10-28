@@ -43,6 +43,11 @@ def stop(bg_id: str) -> int:
     return 0
 
 
+def thinking_env() -> str:
+    names = ("CLAUDE_CODE_EFFORT_LEVEL", "MAX_THINKING_TOKENS", "CLAUDE_CODE_DISABLE_THINKING")
+    return " ".join(f"{name}={os.environ.get(name, '-')}" for name in names)
+
+
 def main() -> int:
     if sys.argv[1:2] == ["stop"]:
         return stop(sys.argv[2] if len(sys.argv) > 2 else "")
@@ -98,7 +103,7 @@ def main() -> int:
         return 0
     emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "duration_ms": 10,
           "total_cost_usd": 0.0123, "session_id": sid, "permission_denials": [], "terminal_reason": "completed",
-          "result": f"echo: {prompt} | argv: {' '.join(sys.argv[1:])}"})
+          "result": f"echo: {prompt} | argv: {' '.join(sys.argv[1:])} | env: {thinking_env()}"})
     return 0
 
 

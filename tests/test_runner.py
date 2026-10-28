@@ -70,10 +70,10 @@ def test_apply_event_real_stream_shape(tmp_path: Path) -> None:
 
 
 def test_build_args_and_env(make_settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    runner = ClaudeRunner(make_settings(CLAUDE_MODEL="opus"))
+    runner = ClaudeRunner(make_settings())
     sid = "6a17f423-802d-4103-b021-8562aecdb7d7"
     # Full access: bypass flag, NO --allowedTools, no limits when they are None.
-    full = runner.build_args(RunRequest(prompt="x", cwd=tmp_path, mode=RunMode.RESUME, session_id=sid,
+    full = runner.build_args(RunRequest(prompt="x", cwd=tmp_path, mode=RunMode.RESUME, session_id=sid, model="opus",
                                         skip_permissions=True))
     assert full[:4] == ["-p", "--output-format", "stream-json", "--verbose"]
     assert full[full.index("--resume") + 1] == sid and full[full.index("--model") + 1] == "opus"

@@ -245,8 +245,8 @@ def test_state_migration_v1_applies_full_trust_default(tmp_path: Path) -> None:
     async def scenario() -> None:
         migrated = await StateStore(path, BotState(skip_permissions=True)).load()
         assert migrated.skip_permissions and migrated.limit_profile is LimitProfile.AUTO
-        assert migrated.schema_version == STATE_SCHEMA_VERSION == 3 and migrated.active_session_id == "abc"
-        assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 3
+        assert migrated.schema_version == STATE_SCHEMA_VERSION == 4 and migrated.active_session_id == "abc"
+        assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 4
         assert migrated.bg_session_policy is BgSessionPolicy.ASK
         # v2 -> v3: an explicit v2 choice is kept, the new policy comes from BG_SESSION_POLICY.
         path.write_text(json.dumps({"skip_permissions": False, "schema_version": 2}), encoding="utf-8")
