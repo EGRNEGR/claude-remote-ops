@@ -18,6 +18,13 @@ stream-json events (verified on Claude Code 2.1.304):
   {"type":"rate_limit_event","rate_limit_info":{"status":"allowed",...}}
   {"type":"result","subtype":"success"|"error_*","is_error":bool,"result":str,"total_cost_usd":float,
    "session_id":...,"num_turns":int,"duration_ms":int,"permission_denials":[...],"terminal_reason":...}
+
+A chat that is running as a background session on the PC (`claude --bg`, agents view) cannot be resumed:
+`claude -p --resume <id>` exits with code 1 before any event and prints to stderr (2.1.304):
+  Error: That session is running in the background (59080800). Run `claude attach 59080800` to open it,
+  or `claude stop 59080800` first to resume it here. Add --fork-session to branch off a copy instead.
+Both ways out are supported: RunRequest.fork_session (new session id, full context, the PC session keeps
+running) and ClaudeRunner.stop_background() (`claude stop <id>` keeps the conversation, then resume).
 """
 
 from __future__ import annotations
@@ -27,13 +34,14 @@ import contextlib
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import signal
 import subprocess
 import time
 from collections import OrderedDict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -63,6 +71,15 @@ _CMD_UNSAFE_CHARS = frozenset('"%^&|<>!\r\n')
 _CREATION_FLAGS = (
     (subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW) if IS_WINDOWS else 0
 )
+
+# `--resume` refused: the chat runs as a background session. The --continue wording is matched as well.
+BACKGROUND_SESSION_RE = re.compile(
+    r"(?:That session|Your most recent conversation) is running in the background "
+    r"\((?:session )?([A-Za-z0-9_-]{4,64})\)"
+)
+# Short ids printed by `claude --bg` / `claude agents` (e.g. 59080800); also passed to `claude stop`.
+BACKGROUND_ID_RE = re.compile(r"^[A-Za-z0-9_-]{4,64}$")
+STOP_TIMEOUT_SEC = 60.0
 
 
 class RunStatus(StrEnum):
@@ -96,6 +113,26 @@ class RunRequest:
     label: str = ""
     max_turns: int | None = None
     max_budget_usd: float | None = None
+    # --fork-session with --resume / --continue: a new session id with the full context of the chat.
+    fork_session: bool = False
+
+
+@dataclass(slots=True)
+class BackgroundConflict:
+    """The chat is open as a background session on the PC (`claude --bg` / agents view)."""
+
+    bg_id: str
+    message: str
+    handled: bool = False  # a 🌿 / 🛑 button was pressed: ignore repeated taps
+
+
+def detect_background_conflict(lines: Iterable[str]) -> BackgroundConflict | None:
+    for line in lines:
+        match = BACKGROUND_SESSION_RE.search(line)
+        if match is not None:
+            message = line.strip().removeprefix("Error:").strip()
+            return BackgroundConflict(bg_id=match.group(1), message=message)
+    return None
 
 
 LIMIT_SUBTYPES = frozenset({"error_max_turns", "error_max_budget_usd"})
@@ -146,6 +183,7 @@ class RunState:
     error: str | None = None
     version: int = 0
     mcp_servers: list[str] = field(default_factory=list)
+    background_conflict: BackgroundConflict | None = None
     _message_ids: set[str] = field(default_factory=set)
 
     @property
@@ -406,6 +444,8 @@ class ClaudeRunner:
             args += ["--resume", req.session_id]
         elif req.mode == RunMode.CONTINUE:
             args.append("--continue")
+        if req.fork_session and req.mode in (RunMode.RESUME, RunMode.CONTINUE):
+            args.append("--fork-session")
         if s.CLAUDE_MODEL.strip():
             args += ["--model", s.CLAUDE_MODEL.strip()]
         if req.skip_permissions:
@@ -629,6 +669,13 @@ class ClaudeRunner:
             state.status = RunStatus.FINISHED
             return
         state.status = RunStatus.FAILED
+        if state.result is None and proc.returncode not in (0, None):
+            conflict = detect_background_conflict(state.stderr_tail)
+            if conflict is not None:
+                state.background_conflict = conflict
+                state.error = conflict.message
+                log.info("Run %s: chat is busy in background session %s", state.run_id, conflict.bg_id)
+                return
         if state.result is not None:
             state.error = f"Claude завершился с ошибкой: {state.result.subtype} ({state.result.terminal_reason})"
         else:
@@ -650,3 +697,39 @@ class ClaudeRunner:
     async def kill_all(self) -> None:
         for run_id in list(self._active):
             await self.kill(run_id)
+
+    async def stop_background(self, bg_id: str, timeout: float = STOP_TIMEOUT_SEC) -> tuple[bool, str]:
+        """`claude stop <bg_id>`: stops a background session on the PC, its conversation is kept.
+
+        Returns (stopped, CLI output). 2.1.304 prints "stopped <id>" (exit 0, also when it was already
+        stopped) or "No job matching '<id>'..." (exit 1).
+        """
+        if not BACKGROUND_ID_RE.match(bg_id):
+            return False, f"Некорректный id фоновой сессии: {bg_id!r}"
+        try:
+            command = [*self.resolve_command(), "stop", bg_id]
+        except ClaudeNotFoundError as exc:
+            return False, str(exc)
+        common = dict(
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=self.build_env(),
+        )
+        try:
+            if self._use_shell:  # bg_id is [A-Za-z0-9_-] only: nothing for cmd.exe to interpret
+                proc = await asyncio.create_subprocess_shell(
+                    subprocess.list2cmdline(command), creationflags=_CREATION_FLAGS, **common
+                )
+            else:
+                proc = await asyncio.create_subprocess_exec(*command, creationflags=_CREATION_FLAGS, **common)
+        except OSError as exc:
+            return False, f"Не удалось запустить claude stop: {exc}"
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except TimeoutError:
+            await kill_process_tree(proc.pid)
+            return False, f"claude stop {bg_id} не ответил за {timeout:g} с"
+        text = strip_ansi(out.decode("utf-8", errors="replace")).strip()
+        log.info("claude stop %s -> %s: %s", bg_id, proc.returncode, one_line(text))
+        return proc.returncode == 0, text

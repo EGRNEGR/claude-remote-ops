@@ -8,13 +8,15 @@ from pathlib import Path
 from typing import TypeVar
 
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.services.file_manager import EntryInfo
 from src.services.session_parser import ProjectInfo, SessionMeta
 from src.services.state import (
+    BG_POLICY_TITLES,
     RUN_MODE_TITLES,
+    BgSessionPolicy,
     BotState,
     LimitProfile,
     RunLimits,
@@ -30,6 +32,7 @@ BTN_SESSIONS = "📂 Сессии"
 BTN_FILES = "🗂 Файлы"
 BTN_MODE = "⚙️ Режим"
 BTN_STATUS = "📊 Статус"
+BTN_RESTART = "🔄 Перезапустить бота"
 REPLY_BUTTONS = (BTN_SESSIONS, BTN_FILES, BTN_MODE, BTN_STATUS)
 
 
@@ -55,12 +58,12 @@ class FileCb(CallbackData, prefix="fb"):
 
 
 class RunCb(CallbackData, prefix="rn"):
-    action: str  # kill | files | retry
+    action: str  # kill | files | retry | fork | bgstop
     run_id: str
 
 
 class ModeCb(CallbackData, prefix="md"):
-    action: str  # new | continue | resume | perm_full | perm_restricted | lim_<profile> | watch
+    action: str  # new | continue | resume | perm_full | perm_restricted | lim_<profile> | bg_<policy> | watch
 
 
 class UpCb(CallbackData, prefix="up"):
@@ -206,10 +209,14 @@ def mode_kb(state: BotState, watcher_running: bool, env_limits: RunLimits) -> In
             text=mark + limit_profile_title(profile, env_limits),
             callback_data=ModeCb(action=f"lim_{profile.value}"),
         )
+    for policy in (BgSessionPolicy.ASK, BgSessionPolicy.FORK):
+        mark = "✅ " if state.bg_session_policy == policy else ""
+        b.button(text=mark + BG_POLICY_TITLES[policy], callback_data=ModeCb(action=f"bg_{policy.value}"))
     watch = "ВКЛ" if watcher_running else "ВЫКЛ"
     b.button(text=f"👁 Авто-отчеты (watchdog): {watch}", callback_data=ModeCb(action="watch"))
     b.button(text="📂 Выбрать проект / сессию", callback_data=ProjCb(action="list"))
     b.button(text="🗂 Выбрать папку в проводнике", callback_data=FileCb(action="roots"))
+    b.button(text=BTN_RESTART, callback_data=MenuCb(action="restart"))
     b.adjust(1)
     return b.as_markup()
 
@@ -242,12 +249,40 @@ def run_done_kb(
     return markup if markup.inline_keyboard else None
 
 
+def background_conflict_kb(run_id: str, bg_id: str, allow_stop: bool = True) -> InlineKeyboardMarkup:
+    """`--resume` refused because the chat runs in a background session on the PC."""
+    b = InlineKeyboardBuilder()
+    b.button(text="🌿 Ответвить копию (--fork-session)", callback_data=RunCb(action="fork", run_id=run_id))
+    if allow_stop:
+        b.button(
+            text=f"🛑 Остановить фоновую (claude stop {bg_id}) и продолжить здесь",
+            callback_data=RunCb(action="bgstop", run_id=run_id),
+        )
+    b.adjust(1)
+    return b.as_markup()
+
+
 def active_runs_kb(run_ids: Sequence[str]) -> InlineKeyboardMarkup | None:
     if not run_ids:
         return None
     b = InlineKeyboardBuilder()
     for run_id in run_ids:
         b.button(text=f"🛑 Остановить {run_id}", callback_data=RunCb(action="kill", run_id=run_id))
+    b.adjust(1)
+    return b.as_markup()
+
+
+def status_kb(run_ids: Sequence[str]) -> InlineKeyboardMarkup:
+    """/status: kill switches for active runs (or the main menu when idle) + self-restart."""
+    rows = [list(row) for row in (active_runs_kb(run_ids) or main_inline_kb()).inline_keyboard]
+    rows.append([InlineKeyboardButton(text=BTN_RESTART, callback_data=MenuCb(action="restart").pack())])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def restart_confirm_kb() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="🔄 Да, перезапустить", callback_data=MenuCb(action="restart_force"))
+    b.button(text="❌ Отмена", callback_data=MenuCb(action="cancel"))
     b.adjust(1)
     return b.as_markup()
 

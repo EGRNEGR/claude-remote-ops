@@ -17,7 +17,8 @@ from src.utils.winpath import long_path, retry_on_lock
 log = logging.getLogger(__name__)
 
 # v1: initial format. v2: limit profiles + full-trust default (skip-permissions) applied on upgrade.
-STATE_SCHEMA_VERSION = 2
+# v3: policy for a chat that is busy in a background session on the PC (BG_SESSION_POLICY on upgrade).
+STATE_SCHEMA_VERSION = 3
 
 
 class RunMode(StrEnum):
@@ -37,6 +38,19 @@ class LimitProfile(StrEnum):
     AUTO = "auto"
     ECONOMY = "economy"
     PRO = "pro"
+
+
+class BgSessionPolicy(StrEnum):
+    """What to do when `--resume` hits "That session is running in the background (<id>)"."""
+
+    ASK = "ask"    # show 🌿 fork / 🛑 stop-and-continue buttons
+    FORK = "fork"  # rerun right away with --fork-session
+
+
+BG_POLICY_TITLES: dict[BgSessionPolicy, str] = {
+    BgSessionPolicy.ASK: "❓ Чат занят на ПК: спросить (🌿 копия / 🛑 стоп)",
+    BgSessionPolicy.FORK: "🌿 Чат занят на ПК: сразу копия (--fork-session)",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +104,7 @@ class BotState:
     skip_permissions: bool = True
     watcher_enabled: bool = True
     limit_profile: LimitProfile = LimitProfile.AUTO
+    bg_session_policy: BgSessionPolicy = BgSessionPolicy.ASK
     schema_version: int = STATE_SCHEMA_VERSION
 
     @classmethod
@@ -105,12 +120,17 @@ class BotState:
             state.limit_profile = LimitProfile(str(state.limit_profile))
         except ValueError:
             state.limit_profile = LimitProfile.AUTO
+        try:
+            state.bg_session_policy = BgSessionPolicy(str(state.bg_session_policy))
+        except ValueError:
+            state.bg_session_policy = BgSessionPolicy.ASK
         return state
 
     def to_dict(self) -> dict[str, object]:
         data = asdict(self)
         data["run_mode"] = str(self.run_mode)
         data["limit_profile"] = str(self.limit_profile)
+        data["bg_session_policy"] = str(self.bg_session_policy)
         return data
 
 
@@ -148,6 +168,8 @@ class StateStore:
                 "State migrated v%s -> v%s: skip_permissions=%s, limit_profile=%s",
                 stored_version, STATE_SCHEMA_VERSION, state.skip_permissions, state.limit_profile,
             )
+        if stored_version < 3:
+            state.bg_session_policy = self._defaults.bg_session_policy
         state.schema_version = STATE_SCHEMA_VERSION
         self._state = state
         if stored_version < STATE_SCHEMA_VERSION:

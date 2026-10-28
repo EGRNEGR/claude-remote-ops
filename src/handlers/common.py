@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from src.context import AppContext
-from src.keyboards.inline import BTN_STATUS, MenuCb, active_runs_kb, main_inline_kb, main_reply_kb
+from src.keyboards.inline import BTN_STATUS, MenuCb, main_inline_kb, main_reply_kb, status_kb
 from src.services.state import RUN_MODE_TITLES, limit_profile_title
 from src.utils.text import esc, esc_fit, human_duration
 
@@ -29,6 +29,7 @@ HELP_TEXT = (
     "/continue [задача] - продолжить последний чат папки\n"
     "/watch - вкл/выкл авто-отчеты о работе на ПК\n"
     "/status - состояние и активные процессы\n"
+    "/restart - безопасно перезапустить бота (новый процесс, затем остановка старого)\n"
     "/cancel - отменить текущий ввод\n\n"
     "📎 Отправьте документ или фото - бот сохранит его в рабочую папку и предложит задачу для Claude.\n"
     "🎙 Голосовое или аудио - бот распознает речь (Whisper) и выполнит ее как текстовую задачу."
@@ -88,16 +89,14 @@ async def cmd_help(message: Message) -> None:
 @router.message(F.text == BTN_STATUS)
 async def cmd_status(message: Message, ctx: AppContext, state: FSMContext) -> None:
     await state.clear()
-    markup = active_runs_kb([r.run_id for r in ctx.runner.active_runs]) or main_inline_kb()
-    await message.answer(render_status(ctx), reply_markup=markup)
+    await message.answer(render_status(ctx), reply_markup=status_kb([r.run_id for r in ctx.runner.active_runs]))
 
 
 @router.callback_query(MenuCb.filter(F.action == "status"))
 async def cb_status(call: CallbackQuery, ctx: AppContext) -> None:
     await call.answer()
     if isinstance(call.message, Message):
-        markup = active_runs_kb([r.run_id for r in ctx.runner.active_runs]) or main_inline_kb()
-        await call.message.answer(render_status(ctx), reply_markup=markup)
+        await call.message.answer(render_status(ctx), reply_markup=status_kb([r.run_id for r in ctx.runner.active_runs]))
 
 
 @router.message(Command("cancel"))

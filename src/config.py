@@ -71,6 +71,8 @@ class Settings(BaseSettings):
     # Full trust by default: the bot is already locked to ADMIN_USER_ID by AuthMiddleware.
     SKIP_PERMISSIONS_DEFAULT: bool = True
     MAX_CONCURRENT_RUNS: int = Field(default=2, ge=1, le=10)
+    # Chat busy in a background session on the PC: ask = buttons 🌿 / 🛑, fork = rerun with --fork-session
+    BG_SESSION_POLICY: Literal["ask", "fork"] = "ask"
 
     # --- UX / limits ---
     STATUS_UPDATE_INTERVAL: float = Field(default=3.0, ge=1.0)
@@ -103,6 +105,10 @@ class Settings(BaseSettings):
     WATCH_ON_START: bool = True
     WATCH_DEBOUNCE_SEC: float = Field(default=30.0, ge=5.0)
     WATCH_IGNORE_HEADLESS: bool = True
+
+    # --- Self-restart (/restart) ---
+    # How long the old process waits for the new one to start (start_bot.ps1 may run pip install first)
+    RESTART_READY_TIMEOUT_SEC: int = Field(default=180, ge=10, le=1800)
 
     # --- Runtime ---
     DATA_DIR: Path = BASE_DIR / "data"
@@ -142,7 +148,7 @@ class Settings(BaseSettings):
             return Path(os.path.expandvars(os.path.expanduser(value.strip().strip('"'))))
         return value
 
-    @field_validator("WHISPER_DEVICE", mode="before")
+    @field_validator("WHISPER_DEVICE", "BG_SESSION_POLICY", mode="before")
     @classmethod
     def _lower_device(cls, value: object) -> object:
         return value.strip().lower() if isinstance(value, str) else value
@@ -185,6 +191,10 @@ class Settings(BaseSettings):
     @property
     def state_file(self) -> Path:
         return self.DATA_DIR / "state.json"
+
+    @property
+    def restart_state_file(self) -> Path:
+        return self.DATA_DIR / "restart_state.json"
 
 
 @lru_cache(maxsize=1)

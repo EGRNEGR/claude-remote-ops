@@ -6,7 +6,10 @@ FFmpeg, so no system-wide ffmpeg is needed on Windows.
 CUDA on Windows: ctranslate2 reports a CUDA device as soon as the NVIDIA driver is present, but it
 also needs cuBLAS 12 and cuDNN 9 DLLs. A missing cuDNN aborts the whole process on the first
 inference (not an exception), so WHISPER_DEVICE=auto picks CUDA only when those DLLs really load.
-They can come from a CUDA toolkit on PATH or from `pip install nvidia-cublas-cu12 nvidia-cudnn-cu12`.
+They come from the nvidia-cublas-cu12 / nvidia-cudnn-cu12 wheels (requirements.txt) or from a CUDA
+toolkit on PATH. The wheels keep the DLLs in site-packages/nvidia/*/bin, which Windows does not search,
+so register_nvidia_dll_dirs() adds them before WhisperModel is created: os.add_dll_directory() for
+ctranslate2 itself and PATH for cuDNN, which loads its sub-libraries (cudnn_ops64_9.dll ...) by name.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ import asyncio
 import ctypes
 import logging
 import os
+import site
 import sys
 import time
 from dataclasses import dataclass
@@ -28,6 +32,8 @@ log = logging.getLogger(__name__)
 
 _CUDA_DLLS_WINDOWS = ("cublas64_12.dll", "cudnn_ops64_9.dll")
 _CUDA_LIBS_POSIX = ("libcublas.so.12", "libcudnn_ops.so.9")
+# Handles returned by os.add_dll_directory(): a directory stays registered while its handle is open.
+_DLL_DIR_HANDLES: dict[str, Any] = {}
 
 
 class TranscriberError(Exception):
@@ -81,21 +87,46 @@ def decode_audio(path: Path, sampling_rate: int = 16_000) -> Any:
     return np.concatenate(chunks).astype(np.float32) / 32768.0
 
 
-def _register_nvidia_pip_dirs() -> None:
-    """Make DLLs from nvidia-* pip wheels (site-packages/nvidia/*/bin) visible to ctranslate2."""
-    for base in {Path(p) for p in sys.path if p.endswith("site-packages")}:
+def _site_dirs() -> list[Path]:
+    candidates = [*sys.path, *site.getsitepackages()]
+    if site.ENABLE_USER_SITE:
+        candidates.append(site.getusersitepackages())
+    seen: dict[str, Path] = {}
+    for entry in candidates:
+        if entry:
+            seen.setdefault(os.path.normcase(os.path.abspath(entry)), Path(entry))
+    return list(seen.values())
+
+
+def register_nvidia_dll_dirs() -> list[str]:
+    """Make DLLs from nvidia-* pip wheels (site-packages/nvidia/*/bin) loadable. Idempotent, Windows only.
+
+    Returns the directories registered by this call (empty when nothing new was found).
+    """
+    if not IS_WINDOWS:
+        return []
+    added: list[str] = []
+    for base in _site_dirs():
         nvidia = base / "nvidia"
         if not nvidia.is_dir():
             continue
-        for bin_dir in nvidia.glob("*/bin"):
-            text = str(bin_dir)
-            if text not in os.environ.get("PATH", ""):
-                os.environ["PATH"] = text + os.pathsep + os.environ.get("PATH", "")
-            if hasattr(os, "add_dll_directory"):
-                try:
-                    os.add_dll_directory(text)
-                except OSError:
-                    continue
+        for bin_dir in sorted(nvidia.glob("*/bin")):
+            text = str(bin_dir.resolve())
+            key = os.path.normcase(text)
+            if key in _DLL_DIR_HANDLES:
+                continue
+            try:
+                _DLL_DIR_HANDLES[key] = os.add_dll_directory(text)
+            except OSError as exc:
+                log.debug("add_dll_directory(%s) failed: %s", text, exc)
+                continue
+            added.append(text)
+    if added:
+        path_entries = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+        known = {os.path.normcase(p) for p in path_entries}
+        os.environ["PATH"] = os.pathsep.join([*(d for d in added if os.path.normcase(d) not in known), *path_entries])
+        log.info("Registered NVIDIA pip DLL dirs: %s", "; ".join(added))
+    return added
 
 
 def cuda_status() -> tuple[bool, str]:
@@ -110,7 +141,7 @@ def cuda_status() -> tuple[bool, str]:
         return False, "CUDA-устройств нет"
     missing: list[str] = []
     if IS_WINDOWS:
-        _register_nvidia_pip_dirs()
+        register_nvidia_dll_dirs()
         for dll in _CUDA_DLLS_WINDOWS:
             try:
                 ctypes.WinDLL(dll)
@@ -185,6 +216,9 @@ class WhisperTranscriber:
         return "cpu", self._compute_type or "int8", reason
 
     def _create_model(self, device: str, compute_type: str) -> Any:
+        if device == "cuda":
+            # Before the import: ctranslate2 resolves cuBLAS/cuDNN when the CUDA model is created.
+            register_nvidia_dll_dirs()
         try:
             from faster_whisper import WhisperModel
         except ImportError as exc:

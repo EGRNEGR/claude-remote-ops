@@ -18,14 +18,18 @@ from pydantic import ValidationError
 
 from src.config import Settings, get_settings
 from src.context import AppContext, build_context
-from src.handlers import common, files, runner, sessions, voice
+from src.handlers import common, files, restart, runner, sessions, voice
 from src.middlewares.auth import AuthMiddleware
 from src.services.session_parser import SessionReport
 from src.services.watcher import SessionWatcher
+from src.utils.single_instance import InstanceLock
 from src.utils.text import esc_fit
 from src.utils.winpath import long_path
 
 log = logging.getLogger("claude_remote_bot")
+
+EXIT_CONFIG_ERROR = 2
+EXIT_ALREADY_RUNNING = 3  # start_bot.ps1 does not restart on this code
 
 BOT_COMMANDS = [
     BotCommand(command="start", description="Главное меню"),
@@ -37,6 +41,7 @@ BOT_COMMANDS = [
     BotCommand(command="continue", description="Продолжить последний чат папки"),
     BotCommand(command="status", description="Состояние и процессы"),
     BotCommand(command="watch", description="Вкл/выкл авто-отчеты"),
+    BotCommand(command="restart", description="Перезапустить бота"),
     BotCommand(command="help", description="Справка"),
 ]
 
@@ -91,7 +96,11 @@ async def on_startup(bot: Bot, ctx: AppContext) -> None:
             watcher_note = f"ошибка: {exc}"
             log.warning("Watcher not started: %s", exc)
     claude = ctx.runner.describe_binary()
-    log.info("Bot started. Claude CLI: %s", claude)
+    log.info("Bot started (PID %s). Claude CLI: %s", os.getpid(), claude)
+    if ctx.restarter.pending is not None:
+        await restart.announce_restart(bot, ctx, ctx.restarter.pending)
+        await ctx.restarter.clear()
+        return
     try:
         await bot.send_message(
             admin_id,
@@ -109,6 +118,9 @@ async def on_shutdown(bot: Bot, ctx: AppContext) -> None:
         await ctx.watcher.stop()
     await ctx.runner.kill_all()
     await ctx.store.save()
+    if ctx.restarter.handed_over:
+        log.info("Polling handed over to the new process")
+        return
     try:
         await bot.send_message(ctx.settings.ADMIN_USER_ID, "🔴 claude-remote-ops остановлен")
     except TelegramAPIError as exc:
@@ -127,7 +139,15 @@ async def on_error(event: ErrorEvent, bot: Bot, ctx: AppContext) -> bool:
     return True
 
 
-async def run_bot(settings: Settings) -> None:
+async def confirm_updates(bot: Bot, update_id: int) -> None:
+    """Mark updates up to `update_id` as handled on Telegram's side (aiogram commits the offset lazily)."""
+    try:
+        await bot.get_updates(offset=update_id + 1, limit=1, timeout=0)
+    except TelegramAPIError as exc:
+        log.warning("Cannot confirm update %s: %s", update_id, exc)
+
+
+async def run_bot(settings: Settings) -> int:
     ctx = build_context(settings)
     bot = Bot(
         token=settings.BOT_TOKEN.get_secret_value(),
@@ -140,14 +160,26 @@ async def run_bot(settings: Settings) -> None:
     dp["ctx"] = ctx
     dp.update.outer_middleware(AuthMiddleware(settings.ADMIN_USER_ID))
     # Order matters: the runner router holds the catch-all "free text = prompt" handler.
-    dp.include_routers(common.router, sessions.router, files.router, voice.router, runner.router)
+    dp.include_routers(common.router, restart.router, sessions.router, files.router, voice.router, runner.router)
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     dp.errors.register(on_error)
+    ctx.restarter.bind(dp.stop_polling)
+    lock = InstanceLock(settings.DATA_DIR)
     try:
+        # Started by /restart: report ready, then wait until the previous process has exited.
+        handover = await ctx.restarter.take_over()
+        if not lock.acquire():
+            log.error("Another claude-remote-ops instance is already running for %s", settings.DATA_DIR)
+            print("❌ Бот уже запущен (другой процесс). Остановите его или используйте /restart.", file=sys.stderr)
+            return EXIT_ALREADY_RUNNING
+        if handover is not None and handover.update_id is not None:
+            await confirm_updates(bot, handover.update_id)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        lock.release()
         await bot.session.close()
+    return 0
 
 
 def main() -> int:
@@ -160,10 +192,10 @@ def main() -> int:
             field = ".".join(str(p) for p in err.get("loc", ())) or "settings"
             print(f"  - {field}: {err.get('msg')}", file=sys.stderr)
         print("\nСкопируйте .env.example в .env и заполните BOT_TOKEN, ADMIN_USER_ID, ALLOWED_DIRS.", file=sys.stderr)
-        return 2
+        return EXIT_CONFIG_ERROR
     setup_logging(settings)
     try:
-        asyncio.run(run_bot(settings))
+        return asyncio.run(run_bot(settings))
     except KeyboardInterrupt:
         log.info("Stopped by Ctrl+C")
     return 0

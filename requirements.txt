@@ -6,3 +6,6 @@ watchdog>=5.0
 faster-whisper>=1.1,<2
 av>=12
 numpy>=1.26
+# CUDA 12 runtime for faster-whisper on NVIDIA GPUs (cuBLAS 12.8+ is required for RTX 50xx / Blackwell)
+nvidia-cublas-cu12>=12.8,<13; platform_system == "Windows"
+nvidia-cudnn-cu12>=9,<10; platform_system == "Windows"

@@ -10,11 +10,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from src.config import Settings
+from src.config import BASE_DIR, Settings
 from src.services.claude_runner import ClaudeRunner
 from src.services.file_manager import FileManager, PathAccessError, SafePathManager
+from src.services.restarter import RestartManager
 from src.services.session_parser import SessionInspector
-from src.services.state import BotState, RunLimits, RunMode, StateStore, limits_for
+from src.services.state import BgSessionPolicy, BotState, RunLimits, RunMode, StateStore, limits_for
 from src.services.transcriber import WhisperTranscriber
 from src.services.watcher import SessionWatcher
 from src.utils.registry import TokenRegistry
@@ -32,6 +33,7 @@ class AppContext:
     store: StateStore
     tokens: TokenRegistry
     transcriber: WhisperTranscriber
+    restarter: RestartManager
     watcher: SessionWatcher | None = None
     _background: set[asyncio.Task[Any]] = field(default_factory=set)
     _pending_voice: OrderedDict[int, str] = field(default_factory=OrderedDict)
@@ -93,6 +95,7 @@ def build_context(settings: Settings) -> AppContext:
     defaults = BotState(
         skip_permissions=settings.SKIP_PERMISSIONS_DEFAULT,
         watcher_enabled=settings.WATCH_ON_START,
+        bg_session_policy=BgSessionPolicy(settings.BG_SESSION_POLICY),
     )
     return AppContext(
         settings=settings,
@@ -103,4 +106,10 @@ def build_context(settings: Settings) -> AppContext:
         store=StateStore(settings.state_file, defaults),
         tokens=TokenRegistry(),
         transcriber=WhisperTranscriber.from_settings(settings),
+        restarter=RestartManager(
+            state_file=settings.restart_state_file,
+            base_dir=BASE_DIR,
+            stderr_log=settings.LOG_DIR / "restart_stderr.log",
+            ready_timeout=settings.RESTART_READY_TIMEOUT_SEC,
+        ),
     )

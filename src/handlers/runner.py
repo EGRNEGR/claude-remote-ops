@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from dataclasses import replace
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter
@@ -21,6 +22,7 @@ from src.keyboards.inline import (
     MenuCb,
     ModeCb,
     RunCb,
+    background_conflict_kb,
     mode_kb,
     run_done_kb,
     run_status_kb,
@@ -28,8 +30,10 @@ from src.keyboards.inline import (
 from src.services.claude_runner import RunnerBusyError, RunRequest, RunState, RunStatus
 from src.services.file_manager import PathAccessError
 from src.services.state import (
+    BG_POLICY_TITLES,
     RUN_MODE_TITLES,
     UNLIMITED,
+    BgSessionPolicy,
     LimitProfile,
     RunLimits,
     RunMode,
@@ -56,6 +60,7 @@ _SUBTYPE_HINTS = {
     "error_max_budget_usd": "Достигнут лимит бюджета (--max-budget-usd). Нажмите 🔓 «Повторить без ограничений».",
     "error_during_execution": "Ошибка во время выполнения.",
 }
+BUSY_TITLE = "🌿 <b>Чат занят фоновой сессией на ПК</b>"
 RETRY_PROMPT = (
     "Предыдущий запуск был остановлен ограничениями бота ({reason}). Теперь разрешены все инструменты "
     "(Bash, Skills, MCP) и лимиты сняты. Продолжи с того места, где остановился, и доведи исходную "
@@ -71,6 +76,8 @@ def _mode_line(state: RunState) -> str:
     sid = state.session_id or req.session_id
     if sid:
         line += f" · <code>{esc(sid[:8])}</code>"
+    if req.fork_session:
+        line += " · 🌿 --fork-session"
     line += " · 🔓 full access" if req.skip_permissions else " · 🔒 restricted"
     limits = RunLimits(req.max_turns, req.max_budget_usd)
     line += " · ♾" if limits.unlimited else f" · 💵 {esc(limits.describe())}"
@@ -103,8 +110,9 @@ def render_status(state: RunState) -> str:
 
 def render_final(state: RunState) -> str:
     result = state.result
+    title = BUSY_TITLE if state.background_conflict is not None else _STATUS_TITLES[state.status]
     lines = [
-        f"{_STATUS_TITLES[state.status]} · ⏱ {human_duration(state.elapsed)}",
+        f"{title} · ⏱ {human_duration(state.elapsed)}",
         f"📁 <code>{esc_fit(str(state.request.cwd), 300)}</code>",
         _mode_line(state),
     ]
@@ -276,6 +284,51 @@ def build_unrestricted_retry(state: RunState) -> RunRequest:
     )
 
 
+def build_fork_retry(state: RunState) -> RunRequest:
+    """Same prompt in a new branch of the busy chat: --resume <id> --fork-session (full context)."""
+    req = state.request
+    return replace(req, fork_session=True, label="🌿 копия чата: " + (req.label or req.prompt))
+
+
+def build_resume_after_stop(state: RunState) -> RunRequest:
+    """Same prompt in the original chat once `claude stop <bg_id>` has released it."""
+    req = state.request
+    return replace(req, fork_session=False, label="🛑 после claude stop: " + (req.label or req.prompt))
+
+
+def _busy_text(state: RunState) -> str:
+    conflict = state.background_conflict
+    assert conflict is not None
+    sid = state.request.session_id or ""
+    bg = esc(conflict.bg_id)
+    return (
+        f"⚠️ Чат <code>{esc(sid[:8])}</code> сейчас открыт в фоновой сессии Claude на ПК (<code>{bg}</code>), "
+        "поэтому <code>--resume</code> отказался его продолжать.\n\n"
+        "🌿 <b>Ответвить копию</b>: тот же запрос в новой ветке с полным контекстом чата "
+        "(<code>--fork-session</code>), сессия на ПК продолжит работать.\n"
+        f"🛑 <b>Остановить фоновую и продолжить здесь</b>: <code>claude stop {bg}</code> "
+        "(переписка сохранится), затем запрос в исходном чате."
+    )
+
+
+async def _handle_background_conflict(bot: Bot, chat_id: int, ctx: AppContext, state: RunState) -> None:
+    conflict = state.background_conflict
+    assert conflict is not None
+    # A forked run has a new session id and cannot collide again: never auto-fork twice.
+    if ctx.state.bg_session_policy == BgSessionPolicy.FORK and not state.request.fork_session:
+        conflict.handled = True
+        await bot.send_message(
+            chat_id,
+            f"🌿 Чат занят фоновой сессией на ПК (<code>{esc(conflict.bg_id)}</code>): "
+            "запускаю тот же запрос в копии чата (<code>--fork-session</code>)...",
+        )
+        await launch_run(bot, chat_id, ctx, build_fork_retry(state))
+        return
+    await bot.send_message(
+        chat_id, _busy_text(state), reply_markup=background_conflict_kb(state.run_id, conflict.bg_id)
+    )
+
+
 async def launch_run(bot: Bot, chat_id: int, ctx: AppContext, request: RunRequest) -> None:
     try:
         ctx.runner.ensure_capacity()
@@ -304,10 +357,18 @@ async def _run_and_report(bot: Bot, chat_id: int, ctx: AppContext, request: RunR
     result = state.result
     session_id = (result.session_id if result else None) or state.session_id
     await updater.edit(render_final(state), None)
+    if state.background_conflict is not None:
+        await _handle_background_conflict(bot, chat_id, ctx, state)
+        return
 
     if session_id and state.status in (RunStatus.FINISHED, RunStatus.FAILED, RunStatus.KILLED):
         st = ctx.state
-        title = st.active_session_title if st.active_session_id == session_id else truncate(one_line(request.prompt), 60)
+        if st.active_session_id == session_id:
+            title = st.active_session_title
+        elif request.fork_session and st.active_session_id == request.session_id and st.active_session_title:
+            title = "🌿 " + st.active_session_title.removeprefix("🌿 ")
+        else:
+            title = truncate(one_line(request.prompt), 60)
         await ctx.store.update(
             active_session_id=session_id,
             active_session_cwd=str(request.cwd),
@@ -333,9 +394,15 @@ async def _run_and_report(bot: Bot, chat_id: int, ctx: AppContext, request: RunR
     elif markup is not None:
         await bot.send_message(chat_id, "📎 Действия по завершенному запуску:", reply_markup=markup)
     if session_id and state.status in (RunStatus.FINISHED, RunStatus.FAILED, RunStatus.KILLED):
+        branch = ""
+        if request.fork_session and request.session_id and request.session_id != session_id:
+            branch = (
+                f"🌿 Это новая ветка <code>{esc(session_id[:8])}</code>, исходный чат "
+                f"<code>{esc(request.session_id[:8])}</code> на ПК не тронут.\n"
+            )
         await bot.send_message(
             chat_id,
-            "↪️ Следующее сообщение продолжит этот чат. /new - начать новый чат в этой папке.",
+            branch + "↪️ Следующее сообщение продолжит этот чат. /new - начать новый чат в этой папке.",
         )
 
 
@@ -356,6 +423,7 @@ def render_mode(ctx: AppContext) -> str:
     else:
         lines.append("🔒 Доступ: <b>Restricted Tools</b> (только CLAUDE_ALLOWED_TOOLS)")
     lines.append(f"📏 Лимиты: <b>{esc(limit_profile_title(st.limit_profile, ctx.env_limits()))}</b>")
+    lines.append(f"🖥 Если чат занят фоновой сессией на ПК: <b>{esc(BG_POLICY_TITLES[st.bg_session_policy])}</b>")
     watcher_on = ctx.watcher is not None and ctx.watcher.running
     lines.append(f"👁 Авто-отчеты: {'ВКЛ' if watcher_on else 'ВЫКЛ'} (пауза {s.WATCH_DEBOUNCE_SEC:g} с)")
     lines.append("")
@@ -426,6 +494,14 @@ async def cb_mode(call: CallbackQuery, callback_data: ModeCb, ctx: AppContext) -
             return
         await ctx.store.update(limit_profile=profile)
         note = f"📏 {limit_profile_title(profile, ctx.env_limits())}"
+    elif action.startswith("bg_"):
+        try:
+            policy = BgSessionPolicy(action.removeprefix("bg_"))
+        except ValueError:
+            await call.answer("Неизвестный вариант", show_alert=True)
+            return
+        await ctx.store.update(bg_session_policy=policy)
+        note = BG_POLICY_TITLES[policy]
     elif action == "watch":
         running = ctx.watcher is not None and ctx.watcher.running
         note = await set_watcher(ctx, not running)
@@ -486,6 +562,59 @@ async def cb_retry_unrestricted(call: CallbackQuery, callback_data: RunCb, bot: 
                 reply_markup=run_done_kb(state.run_id, len(state.touched_files), request.session_id)
             )
     await launch_run(bot, call.from_user.id, ctx, request)
+
+
+async def _drop_keyboard(call: CallbackQuery) -> None:
+    if isinstance(call.message, Message):
+        with contextlib.suppress(TelegramBadRequest):
+            await call.message.edit_reply_markup(reply_markup=None)
+
+
+@router.callback_query(RunCb.filter(F.action.in_({"fork", "bgstop"})))
+async def cb_background_conflict(call: CallbackQuery, callback_data: RunCb, bot: Bot, ctx: AppContext) -> None:
+    state = ctx.runner.get(callback_data.run_id)
+    conflict = state.background_conflict if state is not None else None
+    if state is None or conflict is None:
+        await call.answer("Данные о запуске устарели (бот перезапускался)", show_alert=True)
+        return
+    if conflict.handled:
+        await call.answer("Уже выполняется")
+        return
+    try:
+        ctx.runner.ensure_capacity()  # before `claude stop`: never stop the PC session and then fail to run
+        cwd = ctx.safe.resolve_dir(state.request.cwd)
+    except RunnerBusyError as exc:
+        await call.answer(f"⏳ {truncate(str(exc), 180)}", show_alert=True)
+        return
+    except PathAccessError as exc:
+        await call.answer(f"🔒 {truncate(str(exc), 180)}", show_alert=True)
+        return
+    conflict.handled = True
+    bg = esc(conflict.bg_id)
+    if callback_data.action == "fork":
+        await call.answer("🌿 Ответвляю копию чата...")
+        await _drop_keyboard(call)
+        await launch_run(bot, call.from_user.id, ctx, replace(build_fork_retry(state), cwd=cwd))
+        return
+    await call.answer(f"🛑 claude stop {conflict.bg_id}...")
+    stopped, output = await ctx.runner.stop_background(conflict.bg_id)
+    if not stopped:
+        conflict.handled = False
+        await bot.send_message(
+            call.from_user.id,
+            f"❌ Не удалось остановить фоновую сессию <code>{bg}</code>:\n"
+            f"<pre>{esc_fit(output or 'claude stop ничего не вывел', 1500)}</pre>\n"
+            "Можно 🌿 ответвить копию: она не трогает сессию на ПК.",
+            reply_markup=background_conflict_kb(state.run_id, conflict.bg_id, allow_stop=False),
+        )
+        return
+    await _drop_keyboard(call)
+    await bot.send_message(
+        call.from_user.id,
+        f"🛑 Фоновая сессия <code>{bg}</code> остановлена, переписка сохранена "
+        f"(<code>{esc_fit(one_line(output), 200)}</code>). Продолжаю в исходном чате...",
+    )
+    await launch_run(bot, call.from_user.id, ctx, replace(build_resume_after_stop(state), cwd=cwd))
 
 
 @router.callback_query(RunCb.filter(F.action == "files"))

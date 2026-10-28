@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import threading
 import types
@@ -106,6 +107,45 @@ def test_auto_device_selection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     forced = _make(device="cuda", compute_type="int8_float16")
     FakeModel.fail_cuda_inference = False
     assert asyncio.run(forced.transcribe(audio)).device == "cuda int8_float16"
+
+
+def test_register_nvidia_dll_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    site_dir = tmp_path / "site-packages"
+    bins = [site_dir / "nvidia" / name / "bin" for name in ("cublas", "cudnn")]
+    for bin_dir in bins:
+        bin_dir.mkdir(parents=True)
+    (site_dir / "nvidia" / "cudnn" / "include").mkdir()
+    calls: list[str] = []
+    monkeypatch.setattr(tr, "IS_WINDOWS", True)
+    monkeypatch.setattr(tr, "_DLL_DIR_HANDLES", {})
+    monkeypatch.setattr(tr, "_site_dirs", lambda: [site_dir, tmp_path / "missing"])
+    monkeypatch.setattr(tr.os, "add_dll_directory", lambda path: calls.append(path) or object(), raising=False)
+    monkeypatch.setenv("PATH", r"C:\Windows")
+
+    added = tr.register_nvidia_dll_dirs()
+    assert added == [str(b.resolve()) for b in bins] and calls == added
+    path = os.environ["PATH"].split(os.pathsep)
+    assert path[:2] == added and path[-1] == r"C:\Windows"
+
+    assert tr.register_nvidia_dll_dirs() == [] and len(calls) == 2  # idempotent: no duplicates
+    assert os.environ["PATH"].split(os.pathsep) == path
+
+
+def test_cuda_model_registers_dll_dirs_before_whisper(monkeypatch: pytest.MonkeyPatch, fake_faster_whisper) -> None:
+    order: list[object] = []
+    monkeypatch.setattr(tr, "register_nvidia_dll_dirs", lambda: order.append("register") or [])
+
+    def whisper_model(name: str, **kwargs: object) -> FakeModel:
+        order.append(("WhisperModel", kwargs["device"], kwargs["compute_type"]))
+        return FakeModel(name, **kwargs)  # type: ignore[arg-type]
+
+    fake_faster_whisper.WhisperModel = whisper_model
+    asyncio.run(_make(device="cuda", compute_type="int8_float16").ensure_loaded())
+    assert order == ["register", ("WhisperModel", "cuda", "int8_float16")]
+
+    order.clear()
+    asyncio.run(_make(device="cpu").ensure_loaded())
+    assert order == [("WhisperModel", "cpu", "int8")]  # CPU never touches the NVIDIA DLLs
 
 
 def test_missing_package_is_reported(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

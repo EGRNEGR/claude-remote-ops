@@ -99,12 +99,17 @@ foreach ($name in @("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION
     Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
 }
 
+# /restart в боте запускает новый экземпляр снова через этот скрипт (скрытая консоль, автоперезапуск)
+$env:CLAUDE_REMOTE_LAUNCHER = "start_bot.ps1"
+
 while ($true) {
     Write-Host "[>] Запуск бота ($(Get-Date -Format 'HH:mm:ss')). Остановка: Ctrl+C" -ForegroundColor Green
     & $venvPython (Join-Path $PSScriptRoot "main.py")
     $code = $LASTEXITCODE
-    if ($code -eq 0 -or $code -eq 2 -or $NoRestart) {
+    # 0 = остановлен (в т.ч. после /restart: работу продолжает новый процесс), 2 = ошибка .env, 3 = уже запущен
+    if ($code -eq 0 -or $code -eq 2 -or $code -eq 3 -or $NoRestart) {
         if ($code -eq 2) { Write-Host "[X] Исправьте .env (см. сообщения выше)" -ForegroundColor Red }
+        if ($code -eq 3) { Write-Host "[!] Бот уже работает в другом процессе (например, после /restart)" -ForegroundColor Yellow }
         exit $code
     }
     Write-Host "[!] Бот завершился с кодом $code, перезапуск через $RestartDelaySec с..." -ForegroundColor Yellow

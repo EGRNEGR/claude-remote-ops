@@ -3,6 +3,10 @@
 Prompt comes from stdin (like `claude -p` without a positional prompt).
   * prompt containing "SLEEP": spawns a long-living child (pid written to FAKE_CLAUDE_PIDFILE) and hangs
   * otherwise: init -> tool_use Edit -> tool_result -> text -> result (echoes the prompt and argv)
+Background sessions: FAKE_CLAUDE_BUSY_FILE holds "<session_id> <bg_id>" of a chat open in `claude --bg`.
+  * `--resume <that id>` without --fork-session: exit 1, no events, the 2.1.304 error on stderr
+  * `--fork-session`: runs in the new session FORK_SID
+  * `stop <bg_id>`: deletes the file, "stopped <bg_id>"; an unknown id: "No job matching ...", exit 1
 """
 
 from __future__ import annotations
@@ -13,17 +17,49 @@ import subprocess
 import sys
 import time
 
+FORK_SID = "99999999-8888-4777-8666-555555555555"
+
 
 def emit(obj: dict) -> None:
     sys.stdout.buffer.write((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
     sys.stdout.buffer.flush()
 
 
+def busy_session() -> tuple[str, str] | None:
+    path = os.environ.get("FAKE_CLAUDE_BUSY_FILE")
+    if not path or not os.path.exists(path):
+        return None
+    sid, bg_id = open(path, encoding="utf-8").read().split()
+    return sid, bg_id
+
+
+def stop(bg_id: str) -> int:
+    busy = busy_session()
+    if busy is None or busy[1] != bg_id:
+        print(f"No job matching '{bg_id}'. Run 'claude agents' to list running sessions.")
+        return 1
+    os.remove(os.environ["FAKE_CLAUDE_BUSY_FILE"])
+    print(f"stopped {bg_id}")
+    return 0
+
+
 def main() -> int:
+    if sys.argv[1:2] == ["stop"]:
+        return stop(sys.argv[2] if len(sys.argv) > 2 else "")
     prompt = sys.stdin.buffer.read().decode("utf-8")
     sid = "11111111-2222-4333-8444-555555555555"
     if "--resume" in sys.argv:
         sid = sys.argv[sys.argv.index("--resume") + 1]
+        busy = busy_session()
+        if busy is not None and busy[0] == sid and "--fork-session" not in sys.argv:
+            bg = busy[1]
+            sys.stderr.write(
+                f"Error: That session is running in the background ({bg}). Run `claude attach {bg}` to open it, "
+                f"or `claude stop {bg}` first to resume it here. Add --fork-session to branch off a copy instead.\n"
+            )
+            return 1
+    if "--fork-session" in sys.argv:
+        sid = FORK_SID
     emit({"type": "system", "subtype": "init", "session_id": sid, "cwd": os.getcwd(), "model": "fake-model",
           "permissionMode": "default", "tools": ["Bash", "Edit"]})
     if "SLEEP" in prompt:
