@@ -130,6 +130,9 @@ def render_final(state: RunState) -> str:
     lines.append(" · ".join(stats))
     if state.session_id:
         lines.append(f"🆔 <code>{esc(state.session_id)}</code>")
+    if state.compacted is not None:
+        pre, post = state.compacted
+        lines.append(f"🧹 Контекст сжат: {pre:,} → {post:,} токенов".replace(",", " "))
     if result is not None and result.subtype in _SUBTYPE_HINTS:
         lines.append(f"ℹ️ {_SUBTYPE_HINTS[result.subtype]}")
     if result is not None and result.permission_denials:

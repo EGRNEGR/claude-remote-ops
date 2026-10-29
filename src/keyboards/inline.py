@@ -35,6 +35,7 @@ BTN_MODE = "⚙️ Режим"
 BTN_STATUS = "📊 Статус"
 BTN_RESTART = "🔄 Перезапустить бота"
 BTN_MODEL = "🧠 Модель и Ризонинг"
+BTN_USAGE = "📊 Расход и лимиты"
 REPLY_BUTTONS = (BTN_SESSIONS, BTN_FILES, BTN_MODE, BTN_STATUS)
 
 
@@ -71,6 +72,10 @@ class ModeCb(CallbackData, prefix="md"):
 class ModelCb(CallbackData, prefix="ml"):
     kind: str   # m = model | e = reasoning effort
     value: str  # sonnet | opus | haiku | default / off | low | medium | high | max | default
+
+
+class UsageCb(CallbackData, prefix="us"):
+    action: str  # refresh | days7 | days30 | top | compact | newchat | back
 
 
 class UpCb(CallbackData, prefix="up"):
@@ -283,9 +288,33 @@ def active_runs_kb(run_ids: Sequence[str]) -> InlineKeyboardMarkup | None:
 def status_kb(run_ids: Sequence[str]) -> InlineKeyboardMarkup:
     """/status: kill switches for active runs (or the main menu when idle) + self-restart."""
     rows = [list(row) for row in (active_runs_kb(run_ids) or main_inline_kb()).inline_keyboard]
+    rows.append([InlineKeyboardButton(text=BTN_USAGE, callback_data=UsageCb(action="refresh").pack())])
     rows.append([InlineKeyboardButton(text=BTN_MODEL, callback_data=MenuCb(action="model").pack())])
     rows.append([InlineKeyboardButton(text=BTN_RESTART, callback_data=MenuCb(action="restart").pack())])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def usage_kb(view: str = "main", has_session: bool = True) -> InlineKeyboardMarkup:
+    """/usage dashboard and its detail views (days7 | days30 | top)."""
+    b = InlineKeyboardBuilder()
+    if view == "main":
+        b.button(text="🔄 Обновить", callback_data=UsageCb(action="refresh"))
+        b.button(text="📅 По дням (7д / 30д)", callback_data=UsageCb(action="days7"))
+        b.button(text="📁 По проектам и чатам", callback_data=UsageCb(action="top"))
+        if has_session:
+            b.button(text="🧹 Сжать контекст (/compact)", callback_data=UsageCb(action="compact"))
+        b.button(text="🆕 Начать чистую сессию", callback_data=UsageCb(action="newchat"))
+        b.adjust(1, 2, 1, 1) if has_session else b.adjust(1, 2, 1)
+        return b.as_markup()
+    if view in ("days7", "days30"):
+        other = "days30" if view == "days7" else "days7"
+        b.button(text="📅 30 дней" if other == "days30" else "📅 7 дней", callback_data=UsageCb(action=other))
+        b.button(text="🔄 Обновить", callback_data=UsageCb(action=view))
+    else:
+        b.button(text="🔄 Обновить", callback_data=UsageCb(action="top"))
+    b.button(text="⬅️ К дашборду", callback_data=UsageCb(action="refresh"))
+    b.adjust(2, 1) if view in ("days7", "days30") else b.adjust(1, 1)
+    return b.as_markup()
 
 
 def model_kb(state: BotState) -> InlineKeyboardMarkup:

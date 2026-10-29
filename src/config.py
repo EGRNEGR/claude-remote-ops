@@ -110,6 +110,15 @@ class Settings(BaseSettings):
     WATCH_DEBOUNCE_SEC: float = Field(default=30.0, ge=5.0)
     WATCH_IGNORE_HEADLESS: bool = True
 
+    # --- Usage, quotas and cost (/usage) ---
+    # Live subscription quotas from GET /api/oauth/usage (no model tokens are spent)
+    USAGE_QUOTA_ENABLED: bool = True
+    USAGE_QUOTA_MIN_INTERVAL_SEC: float = Field(default=30.0, ge=5.0)
+    USAGE_API_BASE_URL: str = "https://api.anthropic.com"
+    CLAUDE_CREDENTIALS_FILE: Path = Field(default_factory=lambda: Path.home() / ".claude" / ".credentials.json")
+    # A request with input + cache read + cache write above this counts as "heavy context"
+    USAGE_HEAVY_CONTEXT_TOKENS: int = Field(default=150_000, ge=1_000)
+
     # --- Self-restart (/restart) ---
     # How long the old process waits for the new one to start (start_bot.ps1 may run pip install first)
     RESTART_READY_TIMEOUT_SEC: int = Field(default=180, ge=10, le=1800)
@@ -167,7 +176,7 @@ class Settings(BaseSettings):
     def _lower_device(cls, value: object) -> object:
         return value.strip().lower() if isinstance(value, str) else value
 
-    @field_validator("CLAUDE_PROJECTS_DIR", "DATA_DIR", "LOG_DIR", mode="before")
+    @field_validator("CLAUDE_PROJECTS_DIR", "CLAUDE_CREDENTIALS_FILE", "DATA_DIR", "LOG_DIR", mode="before")
     @classmethod
     def _expand_path(cls, value: object) -> object:
         if isinstance(value, str) and value.strip():
@@ -209,6 +218,10 @@ class Settings(BaseSettings):
     @property
     def restart_state_file(self) -> Path:
         return self.DATA_DIR / "restart_state.json"
+
+    @property
+    def quota_cache_file(self) -> Path:
+        return self.DATA_DIR / "quota_cache.json"
 
 
 @lru_cache(maxsize=1)

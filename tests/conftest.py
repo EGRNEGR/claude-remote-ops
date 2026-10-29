@@ -113,6 +113,9 @@ def make_settings(tmp_path: Path) -> Callable[..., Settings]:
             "CLAUDE_PROJECTS_DIR": str(projects),
             "DATA_DIR": str(tmp_path / "data"),
             "LOG_DIR": str(tmp_path / "logs"),
+            # Never the real OAuth token or network in tests: a missing file -> "no live quota".
+            "CLAUDE_CREDENTIALS_FILE": str(tmp_path / "credentials.json"),
+            "USAGE_API_BASE_URL": "http://127.0.0.1:9",
         }
         values.update(overrides)
         return Settings(_env_file=None, **values)  # type: ignore[call-arg]

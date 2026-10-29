@@ -13,10 +13,12 @@ from typing import Any
 from src.config import BASE_DIR, Settings
 from src.services.claude_runner import ClaudeRunner
 from src.services.file_manager import FileManager, PathAccessError, SafePathManager
+from src.services.quota import QuotaClient
 from src.services.restarter import RestartManager
 from src.services.session_parser import SessionInspector
 from src.services.state import BgSessionPolicy, BotState, RunLimits, RunMode, StateStore, limits_for
 from src.services.transcriber import WhisperTranscriber
+from src.services.usage_tracker import UsageTracker
 from src.services.watcher import SessionWatcher
 from src.utils.registry import TokenRegistry
 
@@ -34,6 +36,8 @@ class AppContext:
     tokens: TokenRegistry
     transcriber: WhisperTranscriber
     restarter: RestartManager
+    usage: UsageTracker
+    quota: QuotaClient
     watcher: SessionWatcher | None = None
     _background: set[asyncio.Task[Any]] = field(default_factory=set)
     _pending_voice: OrderedDict[int, str] = field(default_factory=OrderedDict)
@@ -113,5 +117,12 @@ def build_context(settings: Settings) -> AppContext:
             base_dir=BASE_DIR,
             stderr_log=settings.LOG_DIR / "restart_stderr.log",
             ready_timeout=settings.RESTART_READY_TIMEOUT_SEC,
+        ),
+        usage=UsageTracker(settings.CLAUDE_PROJECTS_DIR, settings.USAGE_HEAVY_CONTEXT_TOKENS),
+        quota=QuotaClient(
+            credentials_file=settings.CLAUDE_CREDENTIALS_FILE,
+            cache_file=settings.quota_cache_file,
+            base_url=settings.USAGE_API_BASE_URL,
+            min_interval_sec=settings.USAGE_QUOTA_MIN_INTERVAL_SEC,
         ),
     )

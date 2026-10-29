@@ -17,7 +17,7 @@ from aiogram.methods import GetFile, SendDocument, SendMessage, TelegramMethod
 from aiogram.types import Audio, CallbackQuery, Chat, Document, File, Message, Update, User, Voice
 
 from src.context import AppContext
-from src.handlers import common, files, model, restart, runner, sessions, voice
+from src.handlers import common, files, model, restart, runner, sessions, usage, voice
 from src.middlewares.auth import AuthMiddleware
 
 ADMIN = 42
@@ -72,7 +72,8 @@ class Harness:
         self.dp.update.outer_middleware(AuthMiddleware(ADMIN))
         # Same order as main.py. Routers are module singletons: detach them from a previous test Dispatcher.
         routers = (
-            common.router, restart.router, model.router, sessions.router, files.router, voice.router, runner.router,
+            common.router, restart.router, model.router, usage.router, sessions.router, files.router, voice.router,
+            runner.router,
         )
         for router in routers:
             router._parent_router = None

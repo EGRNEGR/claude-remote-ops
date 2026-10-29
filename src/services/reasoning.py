@@ -100,11 +100,9 @@ def normalize_model(value: object) -> str:
 def parse_effort(value: object) -> ReasoningEffort:
     if isinstance(value, ReasoningEffort):
         return value
-    text = str(value or "").strip().strip('"').strip().lower()
-    try:
-        return ReasoningEffort(text or ReasoningEffort.DEFAULT)
-    except ValueError:
-        pass
+    text = str(value or "").strip().strip('"').strip().lower() or ReasoningEffort.DEFAULT.value
+    if text in ReasoningEffort._value2member_map_:
+        return ReasoningEffort(text)
     if text in _EFFORT_ALIASES:
         return _EFFORT_ALIASES[text]
     allowed = ", ".join(e.value for e in ReasoningEffort)

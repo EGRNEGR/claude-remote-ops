@@ -193,6 +193,8 @@ class RunState:
     version: int = 0
     mcp_servers: list[str] = field(default_factory=list)
     background_conflict: BackgroundConflict | None = None
+    # (tokens before, tokens after) of a /compact in this run, from the compact_boundary event
+    compacted: tuple[int, int] | None = None
     _message_ids: set[str] = field(default_factory=set)
 
     @property
@@ -284,6 +286,11 @@ def apply_event(state: RunState, event: dict) -> None:
             state.activity = f"🚀 Сессия запущена ({state.model or 'model ?'})"
         elif subtype == "compact_boundary":
             state.activity = "🗜 Сжатие контекста..."
+            meta = event.get("compact_metadata") if isinstance(event.get("compact_metadata"), dict) else {}
+            try:
+                state.compacted = (int(meta.get("pre_tokens") or 0), int(meta.get("post_tokens") or 0))
+            except (TypeError, ValueError):
+                state.compacted = (0, 0)
         elif subtype == "api_retry":
             state.activity = "🔁 Повтор запроса к API..."
     elif etype == "assistant":

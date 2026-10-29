@@ -425,7 +425,8 @@ def _run_bot(settings: Any, session: PollingSession, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(main, "Bot", lambda token, default: Bot(token, session=session, default=default))
     monkeypatch.setattr(rs, "spawn_detached", ready_spawner(settings.restart_state_file, launches))
     # Routers are module singletons: detach them from the Dispatcher of a previous test.
-    for module in (main.common, main.restart, main.model, main.sessions, main.files, main.voice, main.runner):
+    for module in (main.common, main.restart, main.model, main.usage, main.sessions, main.files, main.voice,
+                   main.runner):
         module.router._parent_router = None
     return asyncio.run(asyncio.wait_for(main.run_bot(settings), timeout=60))
 

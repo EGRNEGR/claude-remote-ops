@@ -67,6 +67,15 @@ def main() -> int:
         sid = FORK_SID
     emit({"type": "system", "subtype": "init", "session_id": sid, "cwd": os.getcwd(), "model": "fake-model",
           "permissionMode": "default", "tools": ["Bash", "Edit"]})
+    if prompt.strip() == "/compact":
+        # Same events as the real CLI 2.1.304 for a headless /compact (measured with --resume).
+        emit({"type": "system", "subtype": "status", "status": "compacting", "session_id": sid})
+        emit({"type": "system", "subtype": "compact_boundary", "session_id": sid,
+              "compact_metadata": {"trigger": "manual", "pre_tokens": 349129, "post_tokens": 13187}})
+        emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "total_cost_usd": 0.05,
+              "session_id": sid, "permission_denials": [], "terminal_reason": "completed",
+              "result": f"argv: {' '.join(sys.argv[1:])}"})
+        return 0
     if "SLEEP" in prompt:
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
         pidfile = os.environ.get("FAKE_CLAUDE_PIDFILE")

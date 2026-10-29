@@ -18,7 +18,7 @@ from pydantic import ValidationError
 
 from src.config import Settings, get_settings
 from src.context import AppContext, build_context
-from src.handlers import common, files, model, restart, runner, sessions, voice
+from src.handlers import common, files, model, restart, runner, sessions, usage, voice
 from src.middlewares.auth import AuthMiddleware
 from src.services.session_parser import SessionReport
 from src.services.watcher import SessionWatcher
@@ -42,6 +42,8 @@ BOT_COMMANDS = [
     BotCommand(command="new", description="Новый чат в рабочей папке"),
     BotCommand(command="continue", description="Продолжить последний чат папки"),
     BotCommand(command="status", description="Состояние и процессы"),
+    BotCommand(command="usage", description="Лимиты, кэш и расходы ($)"),
+    BotCommand(command="cost", description="Расходы и лимиты (= /usage)"),
     BotCommand(command="watch", description="Вкл/выкл авто-отчеты"),
     BotCommand(command="restart", description="Перезапустить бота"),
     BotCommand(command="help", description="Справка"),
@@ -76,6 +78,8 @@ def setup_logging(settings: Settings) -> None:
 async def on_startup(bot: Bot, ctx: AppContext) -> None:
     settings = ctx.settings
     await ctx.store.load()
+    # Parse ~/.claude/projects once in the background: the first /usage is then incremental (ms).
+    ctx.spawn(ctx.usage.refresh(), "usage-warmup")
     await bot.set_my_commands(BOT_COMMANDS)
     admin_id = settings.ADMIN_USER_ID
 
@@ -163,7 +167,8 @@ async def run_bot(settings: Settings) -> int:
     dp.update.outer_middleware(AuthMiddleware(settings.ADMIN_USER_ID))
     # Order matters: the runner router holds the catch-all "free text = prompt" handler.
     dp.include_routers(
-        common.router, restart.router, model.router, sessions.router, files.router, voice.router, runner.router,
+        common.router, restart.router, model.router, usage.router, sessions.router, files.router, voice.router,
+        runner.router,
     )
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)

@@ -12,6 +12,7 @@ from aiogram.types import CallbackQuery, Message, Update
 
 from src.context import AppContext
 from src.handlers.common import render_status
+from src.handlers.usage import usage_status_line
 from src.keyboards.inline import MenuCb, restart_confirm_kb, status_kb
 from src.services.restarter import RestartRequest
 from src.utils.text import esc_fit
@@ -82,7 +83,7 @@ async def _hand_over(bot: Bot, ctx: AppContext, chat_id: int, message_id: int, u
 
 async def announce_restart(bot: Bot, ctx: AppContext, request: RestartRequest) -> None:
     """New process: turn "🔄 Перезапускаю бота..." into the ready notice with the current status."""
-    text = f"{RESTARTED_TEXT}\n\n{render_status(ctx)}"
+    text = f"{RESTARTED_TEXT}\n\n{render_status(ctx, await usage_status_line(ctx))}"
     markup = status_kb([r.run_id for r in ctx.runner.active_runs])
     if request.message_id is not None:
         try:

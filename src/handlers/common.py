@@ -8,6 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from src.context import AppContext
+from src.handlers.usage import usage_status_line
 from src.keyboards.inline import BTN_STATUS, MenuCb, main_inline_kb, main_reply_kb, status_kb
 from src.services.reasoning import describe_choice
 from src.services.state import RUN_MODE_TITLES, limit_profile_title
@@ -32,6 +33,7 @@ HELP_TEXT = (
     "/continue [задача] - продолжить последний чат папки\n"
     "/watch - вкл/выкл авто-отчеты о работе на ПК\n"
     "/status - состояние и активные процессы\n"
+    "/usage - лимиты подписки, кэш, расходы по дням и проектам (/cost, /stats)\n"
     "/restart - безопасно перезапустить бота (новый процесс, затем остановка старого)\n"
     "/cancel - отменить текущий ввод\n\n"
     "📎 Отправьте документ или фото - бот сохранит его в рабочую папку и предложит задачу для Claude.\n"
@@ -39,10 +41,12 @@ HELP_TEXT = (
 )
 
 
-def render_status(ctx: AppContext) -> str:
+def render_status(ctx: AppContext, usage_line: str = "") -> str:
     st = ctx.state
     cwd = ctx.active_cwd()
     lines = ["📊 <b>Состояние</b>", ""]
+    if usage_line:
+        lines += [esc(usage_line), ""]
     lines.append(f"📁 Рабочая папка: <code>{esc_fit(str(cwd), 300)}</code>" if cwd else "📁 Рабочая папка: <i>не выбрана</i>")
     if st.active_session_id:
         title = f" «{esc_fit(st.active_session_title, 80)}»" if st.active_session_title else ""
@@ -81,7 +85,7 @@ def render_status(ctx: AppContext) -> str:
 async def cmd_start(message: Message, ctx: AppContext, state: FSMContext) -> None:
     await state.clear()
     await message.answer(HELP_TEXT, reply_markup=main_reply_kb())
-    await message.answer(render_status(ctx), reply_markup=main_inline_kb())
+    await message.answer(render_status(ctx, await usage_status_line(ctx)), reply_markup=main_inline_kb())
 
 
 @router.message(Command("help"))
@@ -93,14 +97,19 @@ async def cmd_help(message: Message) -> None:
 @router.message(F.text == BTN_STATUS)
 async def cmd_status(message: Message, ctx: AppContext, state: FSMContext) -> None:
     await state.clear()
-    await message.answer(render_status(ctx), reply_markup=status_kb([r.run_id for r in ctx.runner.active_runs]))
+    await message.answer(
+        render_status(ctx, await usage_status_line(ctx)), reply_markup=status_kb([r.run_id for r in ctx.runner.active_runs])
+    )
 
 
 @router.callback_query(MenuCb.filter(F.action == "status"))
 async def cb_status(call: CallbackQuery, ctx: AppContext) -> None:
     await call.answer()
     if isinstance(call.message, Message):
-        await call.message.answer(render_status(ctx), reply_markup=status_kb([r.run_id for r in ctx.runner.active_runs]))
+        await call.message.answer(
+            render_status(ctx, await usage_status_line(ctx)),
+            reply_markup=status_kb([r.run_id for r in ctx.runner.active_runs]),
+        )
 
 
 @router.message(Command("cancel"))

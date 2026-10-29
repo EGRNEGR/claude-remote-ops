@@ -251,7 +251,7 @@ class RestartManager:
         try:
             await retry_on_lock(_remove)
         except FileNotFoundError:
-            pass
+            log.debug("Restart state %s is already gone", self._state_file)
 
     # ---------- old process ----------
 
