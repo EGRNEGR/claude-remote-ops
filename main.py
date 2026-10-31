@@ -20,16 +20,19 @@ from src.config import Settings, get_settings
 from src.context import AppContext, build_context
 from src.handlers import common, files, model, restart, runner, sessions, usage, voice
 from src.middlewares.auth import AuthMiddleware
+from src.services.net import PollingWatchdog, ReconnectingSession, probe_telegram, wait_for_telegram
+from src.services.restarter import LAUNCHER_ENV, PS1_LAUNCHER
 from src.services.session_parser import SessionReport
 from src.services.watcher import SessionWatcher
 from src.utils.single_instance import InstanceLock
-from src.utils.text import esc_fit
+from src.utils.text import esc_fit, human_duration
 from src.utils.winpath import long_path
 
 log = logging.getLogger("claude_remote_bot")
 
 EXIT_CONFIG_ERROR = 2
 EXIT_ALREADY_RUNNING = 3  # start_bot.ps1 does not restart on this code
+EXIT_NET_RESTART = 75  # polling stuck while Telegram answers: start_bot.ps1 starts a fresh process
 
 BOT_COMMANDS = [
     BotCommand(command="start", description="Главное меню"),
@@ -80,7 +83,12 @@ async def on_startup(bot: Bot, ctx: AppContext) -> None:
     await ctx.store.load()
     # Parse ~/.claude/projects once in the background: the first /usage is then incremental (ms).
     ctx.spawn(ctx.usage.refresh(), "usage-warmup")
-    await bot.set_my_commands(BOT_COMMANDS)
+    if ctx.netwatch is not None:
+        ctx.netwatch.start()
+    try:
+        await bot.set_my_commands(BOT_COMMANDS)
+    except TelegramAPIError as exc:
+        log.warning("Bot commands not updated: %s", exc)
     admin_id = settings.ADMIN_USER_ID
 
     async def notify(report: SessionReport) -> None:
@@ -120,6 +128,8 @@ async def on_startup(bot: Bot, ctx: AppContext) -> None:
 
 async def on_shutdown(bot: Bot, ctx: AppContext) -> None:
     log.info("Shutting down...")
+    if ctx.netwatch is not None:
+        await ctx.netwatch.stop()
     if ctx.watcher is not None:
         await ctx.watcher.stop()
     await ctx.runner.kill_all()
@@ -127,8 +137,11 @@ async def on_shutdown(bot: Bot, ctx: AppContext) -> None:
     if ctx.restarter.handed_over:
         log.info("Polling handed over to the new process")
         return
+    notice = "🔴 claude-remote-ops остановлен"
+    if ctx.netwatch is not None and ctx.netwatch.triggered:
+        notice = "🔄 Связь с Telegram зависла, перезапускаю бота..."
     try:
-        await bot.send_message(ctx.settings.ADMIN_USER_ID, "🔴 claude-remote-ops остановлен")
+        await bot.send_message(ctx.settings.ADMIN_USER_ID, notice)
     except TelegramAPIError as exc:
         log.debug("Shutdown notice not delivered: %s", exc)
 
@@ -153,10 +166,40 @@ async def confirm_updates(bot: Bot, update_id: int) -> None:
         log.warning("Cannot confirm update %s: %s", update_id, exc)
 
 
+async def notify_restored(bot: Bot, ctx: AppContext, downtime: float) -> None:
+    try:
+        await bot.send_message(
+            ctx.settings.ADMIN_USER_ID,
+            f"📶 Связь с Telegram восстановлена (не было {human_duration(downtime)})",
+        )
+    except TelegramAPIError as exc:
+        log.debug("Reconnect notice not delivered: %s", exc)
+
+
+def build_watchdog(
+    bot: Bot, session: ReconnectingSession, dp: Dispatcher, ctx: AppContext
+) -> PollingWatchdog:
+    """Stalled-polling watchdog; a process restart only when start_bot.ps1 will relaunch the bot."""
+
+    async def restart_process() -> None:
+        await dp.stop_polling()
+
+    via_launcher = os.environ.get(LAUNCHER_ENV, "") == PS1_LAUNCHER
+    return PollingWatchdog(
+        session,
+        stall_sec=ctx.settings.NET_STALL_RESTART_SEC,
+        probe=lambda: probe_telegram(bot),
+        busy=lambda: len(ctx.runner.active_runs()),
+        restart=restart_process if via_launcher else None,
+    )
+
+
 async def run_bot(settings: Settings) -> int:
     ctx = build_context(settings)
+    session = ReconnectingSession(reset_after=settings.NET_RESET_AFTER_FAILURES)
     bot = Bot(
         token=settings.BOT_TOKEN.get_secret_value(),
+        session=session,
         default=DefaultBotProperties(
             parse_mode=ParseMode.HTML,
             link_preview=LinkPreviewOptions(is_disabled=True),
@@ -174,6 +217,13 @@ async def run_bot(settings: Settings) -> int:
     dp.shutdown.register(on_shutdown)
     dp.errors.register(on_error)
     ctx.restarter.bind(dp.stop_polling)
+    watchdog = ctx.netwatch = build_watchdog(bot, session, dp, ctx)
+
+    def on_restored(downtime: float) -> None:
+        if downtime >= settings.NET_RESTORED_NOTICE_SEC:
+            ctx.spawn(notify_restored(bot, ctx, downtime), "net-restored-notice")
+
+    session.on_restored = on_restored
     lock = InstanceLock(settings.DATA_DIR)
     try:
         # Started by /restart: report ready, then wait until the previous process has exited.
@@ -182,13 +232,14 @@ async def run_bot(settings: Settings) -> int:
             log.error("Another claude-remote-ops instance is already running for %s", settings.DATA_DIR)
             print("❌ Бот уже запущен (другой процесс). Остановите его или используйте /restart.", file=sys.stderr)
             return EXIT_ALREADY_RUNNING
+        await wait_for_telegram(bot)
         if handover is not None and handover.update_id is not None:
             await confirm_updates(bot, handover.update_id)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         lock.release()
         await bot.session.close()
-    return 0
+    return EXIT_NET_RESTART if watchdog.triggered else 0
 
 
 def main() -> int:

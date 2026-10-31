@@ -13,6 +13,7 @@ from typing import Any
 from src.config import BASE_DIR, Settings
 from src.services.claude_runner import ClaudeRunner
 from src.services.file_manager import FileManager, PathAccessError, SafePathManager
+from src.services.net import PollingWatchdog
 from src.services.quota import QuotaClient
 from src.services.restarter import RestartManager
 from src.services.session_parser import SessionInspector
@@ -39,6 +40,7 @@ class AppContext:
     usage: UsageTracker
     quota: QuotaClient
     watcher: SessionWatcher | None = None
+    netwatch: PollingWatchdog | None = None
     _background: set[asyncio.Task[Any]] = field(default_factory=set)
     _pending_voice: OrderedDict[int, str] = field(default_factory=OrderedDict)
 

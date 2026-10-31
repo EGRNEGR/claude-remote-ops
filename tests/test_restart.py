@@ -422,7 +422,8 @@ def _restart_update(update_id: int) -> Update:
 
 
 def _run_bot(settings: Any, session: PollingSession, monkeypatch: pytest.MonkeyPatch, launches: list[Launch]) -> int:
-    monkeypatch.setattr(main, "Bot", lambda token, default: Bot(token, session=session, default=default))
+    # The scripted session replaces main's ReconnectingSession.
+    monkeypatch.setattr(main, "Bot", lambda token, default, **_: Bot(token, session=session, default=default))
     monkeypatch.setattr(rs, "spawn_detached", ready_spawner(settings.restart_state_file, launches))
     # Routers are module singletons: detach them from the Dispatcher of a previous test.
     for module in (main.common, main.restart, main.model, main.usage, main.sessions, main.files, main.voice,

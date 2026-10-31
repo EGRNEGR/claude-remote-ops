@@ -123,6 +123,15 @@ class Settings(BaseSettings):
     # How long the old process waits for the new one to start (start_bot.ps1 may run pip install first)
     RESTART_READY_TIMEOUT_SEC: int = Field(default=180, ge=10, le=1800)
 
+    # --- Telegram link (auto-reconnect) ---
+    # Network errors in a row before the HTTP session (connections + DNS cache) is recreated
+    NET_RESET_AFTER_FAILURES: int = Field(default=2, ge=1, le=100)
+    # No successful API call this long while Telegram answers a fresh connection = stuck process:
+    # restart via start_bot.ps1 (waits for running Claude tasks). 0 = off
+    NET_STALL_RESTART_SEC: int = Field(default=300, ge=0)
+    # Tell the admin "connection restored" after outages at least this long. 0 = after any outage
+    NET_RESTORED_NOTICE_SEC: int = Field(default=60, ge=0)
+
     # --- Runtime ---
     DATA_DIR: Path = BASE_DIR / "data"
     LOG_DIR: Path = BASE_DIR / "logs"
