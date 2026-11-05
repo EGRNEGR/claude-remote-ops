@@ -15,6 +15,15 @@ log = logging.getLogger("security")
 _LOG_INTERVAL_SEC = 60.0
 
 
+def _own_pin_notice(event: TelegramObject, user: User | None, data: dict[str, Any]) -> bool:
+    """The service message Telegram adds to the chat when this bot itself pins something."""
+    bot = data.get("bot")
+    return (
+        user is not None and bot is not None and user.id == bot.id
+        and isinstance(event, Update) and event.message is not None and event.message.pinned_message is not None
+    )
+
+
 class AuthMiddleware(BaseMiddleware):
     """Registered as an outer middleware on `dp.update`, i.e. before routing, filters and FSM."""
 
@@ -32,6 +41,8 @@ class AuthMiddleware(BaseMiddleware):
         user: User | None = data.get("event_from_user")
         if user is not None and user.id == self._admin_id:
             return await handler(event, data)
+        if _own_pin_notice(event, user, data):
+            return await handler(event, data)  # "bot pinned a message": removed by the usage router
         self._log_attempt(user, event)
         return None
 

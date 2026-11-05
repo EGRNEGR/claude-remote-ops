@@ -7,7 +7,7 @@ import contextlib
 import logging
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -73,6 +73,16 @@ async def cmd_usage(message: Message, ctx: AppContext, state: FSMContext) -> Non
     await message.answer(text, reply_markup=usage_kb("main", has_session))
     if ctx.quota_pin is not None:
         ctx.quota_pin.poke()  # the fresh quotas are cached: the pinned line follows without a new request
+
+
+@router.message(F.pinned_message)
+async def on_pin_notice(message: Message, ctx: AppContext, bot: Bot) -> None:
+    """Delete "bot pinned a message" for the quota line so the chat keeps only the line itself."""
+    pinned = message.pinned_message
+    own = message.from_user is not None and message.from_user.id == bot.id
+    if own and pinned is not None and pinned.message_id == ctx.state.quota_pin_message_id:
+        with contextlib.suppress(TelegramAPIError):
+            await message.delete()
 
 
 @router.message(Command("pin"))

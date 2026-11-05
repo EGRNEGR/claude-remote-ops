@@ -12,10 +12,12 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import DeleteMessage, EditMessageText, PinChatMessage, SendMessage, UnpinChatMessage
 
+from aiogram.types import Chat, Message
+
 from src.services.quota import QuotaResult, QuotaSnapshot, QuotaWindow
 from src.services.quota_pin import RESET_GRACE_SEC, QuotaPin, next_delay, pin_text
 from src.services.state import STATE_SCHEMA_VERSION, BotState, StateStore
-from tg_harness import ADMIN, MockSession
+from tg_harness import ADMIN, STRANGER, MockSession
 
 # Naive datetimes are local time, the same clock the pinned line is rendered in.
 NOW = datetime(2026, 11, 5, 10, 25).timestamp()
@@ -194,6 +196,26 @@ def test_pin_command_toggles(harness_factory) -> None:  # type: ignore[no-untype
         await h.text("/pin maybe")
         assert "/pin on" in h.session.texts()[-1]
         await pin.stop()
+
+    asyncio.run(scenario())
+
+
+def test_own_pin_notice_is_deleted(harness_factory) -> None:  # type: ignore[no-untyped-def]
+    h = harness_factory()
+
+    def pinned(message_id: int) -> Message:
+        return Message(message_id=message_id, date=datetime.now(), chat=Chat(id=ADMIN, type="private"), text="📊")
+
+    async def scenario() -> None:
+        await h.ctx.store.load()
+        await h.ctx.store.update(quota_pin_message_id=576)
+        await h._feed_message(h.bot.id, pinned_message=pinned(576))  # "Claude pinned «📊 ...»"
+        (delete,) = h.session.take()
+        assert isinstance(delete, DeleteMessage) and delete.message_id != 576
+        # Other pins stay, and a stranger's update is still dropped by the auth filter.
+        await h._feed_message(h.bot.id, pinned_message=pinned(10))
+        await h._feed_message(STRANGER, pinned_message=pinned(576))
+        assert h.session.take() == []
 
     asyncio.run(scenario())
 

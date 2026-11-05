@@ -380,3 +380,14 @@ def test_watchdog_can_be_switched_off(stall_sec: int, enabled: bool) -> None:
 async def _never() -> bool:
     raise AssertionError("probe must not run")
 
+
+
+def test_main_watchdog_counts_running_claude_tasks(make_settings) -> None:  # type: ignore[no-untyped-def]
+    import main
+    from src.context import build_context
+
+    ctx = build_context(make_settings())
+    session = ReconnectingSession()
+    bot = Bot("123456:TEST_TOKEN_abcdefghijklmnopqrstuvwxyz", session=session)
+    watchdog = main.build_watchdog(bot, session, Dispatcher(), ctx)
+    assert watchdog._busy() == 0  # the real callable used by check(), not a test stub

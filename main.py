@@ -195,7 +195,7 @@ def build_watchdog(
         session,
         stall_sec=ctx.settings.NET_STALL_RESTART_SEC,
         probe=lambda: probe_telegram(bot),
-        busy=lambda: len(ctx.runner.active_runs()),
+        busy=lambda: len(ctx.runner.active_runs),
         restart=restart_process if via_launcher else None,
     )
 
