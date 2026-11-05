@@ -135,7 +135,7 @@ def test_state_v3_migrates_and_choice_persists(tmp_path: Path) -> None:
         store = StateStore(path, defaults)
         st = await store.load()
         # v3 -> v4: earlier choices kept, model/effort from CLAUDE_MODEL / CLAUDE_REASONING_EFFORT.
-        assert st.schema_version == STATE_SCHEMA_VERSION == 4 and not st.skip_permissions
+        assert st.schema_version == STATE_SCHEMA_VERSION == 5 and not st.skip_permissions
         assert (st.claude_model, st.reasoning_effort) == ("sonnet", E.LOW)
         await store.update(claude_model="opus", reasoning_effort=E.MAX)
         saved = json.loads(path.read_text(encoding="utf-8"))

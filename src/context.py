@@ -15,6 +15,7 @@ from src.services.claude_runner import ClaudeRunner
 from src.services.file_manager import FileManager, PathAccessError, SafePathManager
 from src.services.net import PollingWatchdog
 from src.services.quota import QuotaClient
+from src.services.quota_pin import QuotaPin
 from src.services.restarter import RestartManager
 from src.services.session_parser import SessionInspector
 from src.services.state import BgSessionPolicy, BotState, RunLimits, RunMode, StateStore, limits_for
@@ -41,6 +42,7 @@ class AppContext:
     quota: QuotaClient
     watcher: SessionWatcher | None = None
     netwatch: PollingWatchdog | None = None
+    quota_pin: QuotaPin | None = None
     _background: set[asyncio.Task[Any]] = field(default_factory=set)
     _pending_voice: OrderedDict[int, str] = field(default_factory=OrderedDict)
 
@@ -104,6 +106,7 @@ def build_context(settings: Settings) -> AppContext:
         bg_session_policy=BgSessionPolicy(settings.BG_SESSION_POLICY),
         claude_model=settings.CLAUDE_MODEL,
         reasoning_effort=settings.CLAUDE_REASONING_EFFORT,
+        quota_pin_enabled=settings.USAGE_PIN_ENABLED,
     )
     return AppContext(
         settings=settings,

@@ -8,7 +8,7 @@ import logging
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
@@ -22,12 +22,14 @@ from src.services.reasoning import model_arg
 from src.services.state import RunMode
 from src.services.usage_report import render_dashboard, render_days, render_top, status_line
 from src.services.usage_tracker import SessionView
-from src.utils.text import esc, esc_fit
+from src.utils.text import esc, esc_fit, human_duration
 
 log = logging.getLogger(__name__)
 router = Router(name="usage")
 
 COMPACT_PROMPT = "/compact"
+PIN_ON = {"on", "вкл", "1", "yes", "да"}
+PIN_OFF = {"off", "выкл", "0", "no", "нет"}
 
 
 async def _quota(ctx: AppContext, force: bool = False) -> QuotaResult | None:
@@ -69,6 +71,34 @@ async def cmd_usage(message: Message, ctx: AppContext, state: FSMContext) -> Non
     await state.clear()
     text, has_session = await build_dashboard(ctx, force_quota=True)
     await message.answer(text, reply_markup=usage_kb("main", has_session))
+    if ctx.quota_pin is not None:
+        ctx.quota_pin.poke()  # the fresh quotas are cached: the pinned line follows without a new request
+
+
+@router.message(Command("pin"))
+async def cmd_pin(message: Message, ctx: AppContext, state: FSMContext, command: CommandObject) -> None:
+    """/pin toggles the pinned quota line, /pin on|off sets it explicitly."""
+    await state.clear()
+    pin = ctx.quota_pin
+    if pin is None or not ctx.settings.USAGE_QUOTA_ENABLED:
+        await message.answer("📌 Закреп с лимитами недоступен: живые квоты выключены (USAGE_QUOTA_ENABLED=false)")
+        return
+    arg = (command.args or "").strip().lower()
+    if arg and arg not in PIN_ON | PIN_OFF:
+        await message.answer("📌 <code>/pin</code> - вкл/выкл закреп с лимитами, <code>/pin on</code> | <code>/pin off</code>")
+        return
+    turn_on = arg in PIN_ON if arg else not pin.enabled
+    if turn_on:
+        await pin.enable()
+        await message.answer(
+            "📌 <b>Закреп с лимитами включен</b>: строка вида <code>📊 35% 5ч. сброс 13:00, 83% нед.</code> "
+            f"обновляется сама раз в {human_duration(ctx.settings.USAGE_PIN_INTERVAL_SEC)}, после каждого "
+            "запуска Claude и сразу после сброса окна. Если закреп пропал - <code>/pin on</code>.",
+            disable_notification=True,
+        )
+    else:
+        await pin.disable()
+        await message.answer("📌 Закреп с лимитами выключен и удален. Включить снова: /pin")
 
 
 async def _edit(call: CallbackQuery, text: str, markup) -> None:  # type: ignore[no-untyped-def]

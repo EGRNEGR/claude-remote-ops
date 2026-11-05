@@ -365,6 +365,8 @@ async def _run_and_report(bot: Bot, chat_id: int, ctx: AppContext, request: RunR
     result = state.result
     session_id = (result.session_id if result else None) or state.session_id
     await updater.edit(render_final(state), None)
+    if ctx.quota_pin is not None:
+        ctx.quota_pin.poke()
     if state.background_conflict is not None:
         await _handle_background_conflict(bot, chat_id, ctx, state)
         return

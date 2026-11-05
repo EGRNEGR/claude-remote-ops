@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 # v1: initial format. v2: limit profiles + full-trust default (skip-permissions) applied on upgrade.
 # v3: policy for a chat that is busy in a background session on the PC (BG_SESSION_POLICY on upgrade).
 # v4: model and reasoning effort (/model), taken from CLAUDE_MODEL / CLAUDE_REASONING_EFFORT on upgrade.
-STATE_SCHEMA_VERSION = 4
+STATE_SCHEMA_VERSION = 5
 
 
 class RunMode(StrEnum):
@@ -109,6 +109,8 @@ class BotState:
     bg_session_policy: BgSessionPolicy = BgSessionPolicy.ASK
     claude_model: str = MODEL_DEFAULT
     reasoning_effort: ReasoningEffort = ReasoningEffort.DEFAULT
+    quota_pin_enabled: bool = True
+    quota_pin_message_id: int | None = None
     schema_version: int = STATE_SCHEMA_VERSION
 
     @classmethod
@@ -186,6 +188,8 @@ class StateStore:
         if stored_version < 4:
             state.claude_model = self._defaults.claude_model
             state.reasoning_effort = self._defaults.reasoning_effort
+        if stored_version < 5:
+            state.quota_pin_enabled = self._defaults.quota_pin_enabled
         state.schema_version = STATE_SCHEMA_VERSION
         self._state = state
         if stored_version < STATE_SCHEMA_VERSION:

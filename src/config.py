@@ -118,6 +118,9 @@ class Settings(BaseSettings):
     CLAUDE_CREDENTIALS_FILE: Path = Field(default_factory=lambda: Path.home() / ".claude" / ".credentials.json")
     # A request with input + cache read + cache write above this counts as "heavy context"
     USAGE_HEAVY_CONTEXT_TOKENS: int = Field(default=150_000, ge=1_000)
+    # Pinned line "📊 35% 5ч. сброс 13:00, 83% нед." in the chat (/pin toggles it; this is the first-run default)
+    USAGE_PIN_ENABLED: bool = True
+    USAGE_PIN_INTERVAL_SEC: int = Field(default=300, ge=60)
 
     # --- Self-restart (/restart) ---
     # How long the old process waits for the new one to start (start_bot.ps1 may run pip install first)

@@ -21,6 +21,7 @@ from src.context import AppContext, build_context
 from src.handlers import common, files, model, restart, runner, sessions, usage, voice
 from src.middlewares.auth import AuthMiddleware
 from src.services.net import PollingWatchdog, ReconnectingSession, probe_telegram, wait_for_telegram
+from src.services.quota_pin import QuotaPin
 from src.services.restarter import LAUNCHER_ENV, PS1_LAUNCHER
 from src.services.session_parser import SessionReport
 from src.services.watcher import SessionWatcher
@@ -47,6 +48,7 @@ BOT_COMMANDS = [
     BotCommand(command="status", description="Состояние и процессы"),
     BotCommand(command="usage", description="Лимиты, кэш и расходы ($)"),
     BotCommand(command="cost", description="Расходы и лимиты (= /usage)"),
+    BotCommand(command="pin", description="Вкл/выкл закреп с лимитами"),
     BotCommand(command="watch", description="Вкл/выкл авто-отчеты"),
     BotCommand(command="restart", description="Перезапустить бота"),
     BotCommand(command="help", description="Справка"),
@@ -85,6 +87,8 @@ async def on_startup(bot: Bot, ctx: AppContext) -> None:
     ctx.spawn(ctx.usage.refresh(), "usage-warmup")
     if ctx.netwatch is not None:
         ctx.netwatch.start()
+    if ctx.quota_pin is not None:
+        ctx.quota_pin.start()
     try:
         await bot.set_my_commands(BOT_COMMANDS)
     except TelegramAPIError as exc:
@@ -130,6 +134,8 @@ async def on_shutdown(bot: Bot, ctx: AppContext) -> None:
     log.info("Shutting down...")
     if ctx.netwatch is not None:
         await ctx.netwatch.stop()
+    if ctx.quota_pin is not None:
+        await ctx.quota_pin.stop()
     if ctx.watcher is not None:
         await ctx.watcher.stop()
     await ctx.runner.kill_all()
@@ -220,10 +226,16 @@ async def run_bot(settings: Settings) -> int:
     watchdog = ctx.netwatch = build_watchdog(bot, session, dp, ctx)
 
     def on_restored(downtime: float) -> None:
+        if ctx.quota_pin is not None:
+            ctx.quota_pin.poke()
         if downtime >= settings.NET_RESTORED_NOTICE_SEC:
             ctx.spawn(notify_restored(bot, ctx, downtime), "net-restored-notice")
 
     session.on_restored = on_restored
+    if settings.USAGE_QUOTA_ENABLED:
+        ctx.quota_pin = QuotaPin(
+            bot, settings.ADMIN_USER_ID, ctx.store, ctx.quota.get, settings.USAGE_PIN_INTERVAL_SEC
+        )
     lock = InstanceLock(settings.DATA_DIR)
     try:
         # Started by /restart: report ready, then wait until the previous process has exited.
