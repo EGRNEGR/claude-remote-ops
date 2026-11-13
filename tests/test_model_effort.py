@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
+from tg_harness import run_cards
 
 from src.keyboards.inline import BTN_MODEL, MenuCb, ModelCb, model_kb
 from src.services.claude_runner import ClaudeRunner, RunRequest
@@ -186,7 +187,7 @@ def test_model_menu_flow(harness_factory) -> None:
         await h.text("/model")
         calls = h.session.take()
         menu = next(c for c in calls if isinstance(c, SendMessage))
-        assert "🧠 Модель: opus · 💭 Ризонинг: high" in menu.text
+        assert "◈ Модель: <b>Opus</b>" in menu.text and "◈ Ризонинг: <b>high</b>" in menu.text
         assert "--model opus --effort high" in menu.text
         assert _buttons(menu.reply_markup)[0] == ["⚡ Sonnet", "✅ 🧠 Opus"]
 
@@ -195,7 +196,7 @@ def test_model_menu_flow(harness_factory) -> None:
         calls = h.session.take()
         assert not any(isinstance(c, SendMessage) for c in calls)
         edit = next(c for c in calls if isinstance(c, EditMessageText))
-        assert "🧠 Модель: sonnet · 💭 Ризонинг: high" in edit.text
+        assert "◈ Модель: <b>Sonnet</b>" in edit.text and "◈ Ризонинг: <b>high</b>" in edit.text
         assert _buttons(edit.reply_markup)[0] == ["✅ ⚡ Sonnet", "🧠 Opus"]
         assert h.ctx.state.claude_model == "sonnet"
         assert any("sonnet" in a for a in _answers(calls))
@@ -206,7 +207,7 @@ def test_model_menu_flow(harness_factory) -> None:
         calls = h.session.take()
         assert h.ctx.state.reasoning_effort is E.LOW and h.ctx.state.claude_model == MODEL_DEFAULT
         last_edit = [c for c in calls if isinstance(c, EditMessageText)][-1]
-        assert "🧠 Модель: авто · 💭 Ризонинг: low" in last_edit.text
+        assert "◈ Модель: <b>Авто</b>" in last_edit.text and "◈ Ризонинг: <b>low</b>" in last_edit.text
 
         # Same button again: no edit (Telegram would answer "message is not modified").
         await h.callback(ModelCb(kind="e", value="low").pack())
@@ -224,8 +225,8 @@ def test_model_menu_flow(harness_factory) -> None:
         await h.text("/model haiku")
         await h.text("/effort max")
         texts = h.session.texts()
-        assert "✅ 🧠 Модель: haiku · 💭 Ризонинг: low" in texts[0]
-        assert "✅ 🧠 Модель: haiku · 💭 Ризонинг: max" in texts[1]
+        assert "Выбор сохранен" in texts[0] and "<b>Haiku</b>" in texts[0] and "<b>low</b>" in texts[0]
+        assert "<b>Haiku</b>" in texts[1] and "<b>max</b>" in texts[1]
         await h.text("/model claude-sonnet-5-5")
         assert h.ctx.state.claude_model == "claude-sonnet-5-5"
         await h.text("/model --dangerously-skip-permissions")
@@ -235,14 +236,15 @@ def test_model_menu_flow(harness_factory) -> None:
         assert h.ctx.state.claude_model == "claude-sonnet-5-5" and h.ctx.state.reasoning_effort is E.MAX
         h.session.take()
 
-        # /status and /mode show the pair and a button that opens the menu.
+        # /status and /mode show the pair; the settings panel has the button that opens the menu.
         for command in ("/status", "/mode"):
             await h.text(command)
             msg = next(c for c in h.session.take() if isinstance(c, SendMessage))
-            assert "🧠 Модель: claude-sonnet-5-5 · 💭 Ризонинг: max" in msg.text
-            assert BTN_MODEL in [b for row in _buttons(msg.reply_markup) for b in row]
+            assert "Sonnet 5.5 · ризонинг max" in msg.text
+            if command == "/mode":
+                assert BTN_MODEL in [b for row in _buttons(msg.reply_markup) for b in row]
         await h.callback(MenuCb(action="model").pack())
-        assert any("Модель и Ризонинг" in t for t in h.session.texts())
+        assert any("Модель и ризонинг" in t for t in h.session.texts(EditMessageText))
 
     asyncio.run(scenario())
 
@@ -256,7 +258,7 @@ def test_run_uses_selected_model_and_effort(harness_factory, tmp_path: Path) -> 
         await h.text(prompt)
         await h.drain()
         calls = h.session.take()
-        answer = next(c.text for c in calls if isinstance(c, SendMessage) and c.parse_mode is None)
+        answer = run_cards(calls)[0].text
         edits = [c.text for c in calls if isinstance(c, EditMessageText)]
         return answer, edits
 
@@ -273,7 +275,7 @@ def test_run_uses_selected_model_and_effort(harness_factory, tmp_path: Path) -> 
         assert "CLAUDE_CODE_EFFORT_LEVEL=max MAX_THINKING_TOKENS=32000 CLAUDE_CODE_DISABLE_THINKING=-" in answer
         assert "ultrathink" in answer
         # The run header shows the pair (and the model the CLI reported in init).
-        assert any("🧠 Модель: opus" in e and "💭 Ризонинг: max" in e for e in edits), edits
+        assert any("Opus" in e and "ризонинг max" in e for e in edits), edits
 
         await h.text("/effort off")
         await h.text("/model auto")
@@ -281,7 +283,7 @@ def test_run_uses_selected_model_and_effort(harness_factory, tmp_path: Path) -> 
         answer, edits = await run("Быстрый вопрос")
         assert "--model" not in answer and "--effort low" in answer and "ultrathink" not in answer
         assert "CLAUDE_CODE_EFFORT_LEVEL=low MAX_THINKING_TOKENS=0 CLAUDE_CODE_DISABLE_THINKING=1" in answer
-        assert any("💭 Ризонинг: off" in e for e in edits)
+        assert any("ризонинг off" in e for e in edits)
 
         await h.text("/effort auto")
         h.session.take()

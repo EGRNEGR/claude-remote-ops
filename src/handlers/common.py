@@ -1,120 +1,175 @@
-"""/start, /help, /status, /cancel and the main menu."""
+"""/start, /help, /status, /cancel."""
 
 from __future__ import annotations
 
+import time
+
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from src.context import AppContext
-from src.handlers.usage import usage_status_line
-from src.keyboards.inline import BTN_STATUS, MenuCb, main_inline_kb, main_reply_kb, status_kb
-from src.services.reasoning import describe_choice
-from src.services.state import RUN_MODE_TITLES, limit_profile_title
+from src.handlers.runner import MODE_NAMES
+from src.handlers.usage import usage_snapshot
+from src.keyboards.inline import STATUS_TEXTS, MenuCb, main_reply_kb, status_kb
+from src.services.quota import QuotaResult
+from src.services.reasoning import ReasoningEffort, effort_label, model_arg
+from src.services.state import RunMode, limit_profile_title
+from src.services.usage_report import quota_rows, spend_row
+from src.services.usage_tracker import UsageSummary
+from src.ui import theme
+from src.ui.formatter import fit_html
 from src.utils.text import esc, esc_fit, human_duration
 
 router = Router(name="common")
 
-HELP_TEXT = (
-    "🤖 <b>claude-remote-ops</b> - пульт Claude Code с телефона\n\n"
-    "<b>Как пользоваться</b>\n"
-    "1. Выберите проект: 📂 Сессии → проект → 🎯 или чат → ▶️ Продолжить\n"
-    "2. Просто напишите задачу текстом - бот запустит <code>claude -p</code> и покажет прогресс\n"
-    "3. Кнопка 🛑 остановит процесс (<code>taskkill /F /T</code>)\n\n"
-    "<b>Команды</b>\n"
-    "/sessions - проекты и сессии Claude, отчеты\n"
-    "/files - проводник по разрешенным папкам\n"
-    "/get <i>имя или *.маска</i> - найти и скачать файл\n"
-    "/mode - режим чата, доступ (Full / Restricted), профиль лимитов, авто-отчеты\n"
-    "/model [имя] - модель (Sonnet / Opus / Haiku) и уровень ризонинга\n"
-    "/pin - вкл/выкл закреп с лимитами (обновляется сам)\n"
-    "/effort <i>off|low|medium|high|xhigh|max|auto</i> - глубина размышлений\n"
-    "/new [задача] - новый чат в рабочей папке\n"
-    "/continue [задача] - продолжить последний чат папки\n"
-    "/watch - вкл/выкл авто-отчеты о работе на ПК\n"
-    "/status - состояние и активные процессы\n"
-    "/usage - лимиты подписки, кэш, расходы по дням и проектам (/cost, /stats)\n"
-    "/restart - безопасно перезапустить бота (новый процесс, затем остановка старого)\n"
-    "/cancel - отменить текущий ввод\n\n"
-    "📎 Отправьте документ или фото - бот сохранит его в рабочую папку и предложит задачу для Claude.\n"
-    "🎙 Голосовое или аудио - бот распознает речь (Whisper) и выполнит ее как текстовую задачу."
+COMMANDS_HELP = "\n".join([
+    "<b>Команды</b>",
+    "/sessions — проекты и чаты Claude, отчеты",
+    "/files — проводник по разрешенным папкам",
+    "/get <i>имя или *.маска</i> — найти и скачать файл",
+    "/usage — лимиты подписки, кэш, расходы (/cost, /stats)",
+    "/mode — настройки запуска: режим, доступ, лимиты, авто-отчеты",
+    "/model [имя] — модель (Sonnet / Opus / Haiku) и ризонинг",
+    "/effort <i>off|low|medium|high|xhigh|max|auto</i> — глубина размышлений",
+    "/new [задача] — новый чат в рабочей папке",
+    "/continue [задача] — продолжить последний чат папки",
+    "/status — состояние и активные процессы",
+    "/watch — вкл/выкл авто-отчеты о работе на ПК",
+    "/pin — закреп с лимитами, обновляется сам",
+    "/restart — безопасно перезапустить бота",
+    "/cancel — отменить текущий ввод",
+])
+
+HOW_TO = theme.lines(
+    theme.item("Выберите проект: 💬 Сессии → проект → 🎯 Рабочая папка или чат → ▶️ Продолжить"),
+    theme.item("Напишите задачу текстом или голосом: бот запустит Claude и покажет прогресс"),
+    theme.item("📎 Документ или фото сохраняются в рабочую папку, подпись станет задачей"),
 )
+BRAND = theme.lines(theme.title("claude-remote-ops"), theme.meta("Пульт Claude Code с телефона"))
 
 
-def render_status(ctx: AppContext, usage_line: str = "") -> str:
+def _model_line(ctx: AppContext) -> str:
+    st = ctx.state
+    parts = [theme.model_name(model_arg(st.claude_model) or "default")]
+    if st.reasoning_effort != ReasoningEffort.DEFAULT:
+        parts.append(f"ризонинг {effort_label(st.reasoning_effort)}")
+    return theme.SEP.join(p for p in parts if p)
+
+
+def context_rows(ctx: AppContext) -> list[str]:
+    """Project, chat and mode of the next run: the facts the user needs before typing a task."""
     st = ctx.state
     cwd = ctx.active_cwd()
-    lines = ["📊 <b>Состояние</b>", ""]
-    if usage_line:
-        lines += [esc(usage_line), ""]
-    lines.append(f"📁 Рабочая папка: <code>{esc_fit(str(cwd), 300)}</code>" if cwd else "📁 Рабочая папка: <i>не выбрана</i>")
-    if st.active_session_id:
-        title = f" «{esc_fit(st.active_session_title, 80)}»" if st.active_session_title else ""
-        lines.append(f"💬 Чат: <code>{esc(st.active_session_id)}</code>{title}")
-    lines.append(f"🧭 Режим: {esc(RUN_MODE_TITLES[st.run_mode])}")
-    access = "🔓 Skip Permissions (Full MCP &amp; Bash)" if st.skip_permissions else "🔒 Restricted Tools"
-    lines.append(f"Доступ: {access}")
-    lines.append(f"📏 Лимиты: {esc(limit_profile_title(st.limit_profile, ctx.env_limits()))}")
-    lines.append(esc(describe_choice(st.claude_model, st.reasoning_effort)))
-    lines.append(f"⏰ Таймаут запуска: {human_duration(ctx.settings.CLAUDE_TIMEOUT_SEC)}")
+    rows = [theme.field("Проект", esc(theme.folder_label(cwd)) if cwd else "не выбран")]
+    if st.run_mode == RunMode.RESUME and st.active_session_id:
+        rows.append(theme.field("Чат", esc_fit(st.active_session_title or "выбранный чат", 80)))
+    rows.append(theme.field("Режим", esc(f"{MODE_NAMES[st.run_mode]}{theme.SEP}{_model_line(ctx)}")))
+    return rows
+
+
+def render_help() -> str:
+    return theme.join_blocks(BRAND, HOW_TO, theme.quote(COMMANDS_HELP))
+
+
+def render_start(ctx: AppContext) -> str:
+    return theme.join_blocks(BRAND, theme.lines(*context_rows(ctx)), HOW_TO, theme.quote(COMMANDS_HELP))
+
+
+def _diagnostics(ctx: AppContext) -> str:
+    st = ctx.state
+    s = ctx.settings
     watcher_on = ctx.watcher is not None and ctx.watcher.running
-    lines.append(f"👁 Авто-отчеты: {'ВКЛ' if watcher_on else 'ВЫКЛ'}")
-    lines.append(f"🤖 Claude CLI: <code>{esc_fit(ctx.runner.describe_binary(), 300)}</code>")
-    if ctx.settings.VOICE_ENABLED:
-        run = "сразу запуск" if ctx.settings.VOICE_AUTO_RUN else "с подтверждением"
-        lines.append(f"🎙 Голосовые: Whisper {esc_fit(ctx.transcriber.describe(), 200)} · {run}")
+    access = "полный (--dangerously-skip-permissions)" if st.skip_permissions else "только CLAUDE_ALLOWED_TOOLS"
+    if s.VOICE_ENABLED:
+        voice = f"Whisper {ctx.transcriber.describe()} · {'сразу запуск' if s.VOICE_AUTO_RUN else 'с подтверждением'}"
     else:
-        lines.append("🎙 Голосовые: выключены")
-    lines.append("🛡 Разрешенные папки:")
-    lines.extend(f"   • <code>{esc_fit(str(root), 200)}</code>" for root in ctx.safe.roots)
+        voice = "выключены"
+    rows = [
+        "<b>Диагностика</b>",
+        f"{theme.BULLET} Claude CLI: <code>{esc_fit(ctx.runner.describe_binary(), 300)}</code>",
+        f"{theme.BULLET} Доступ: {esc(access)}",
+        f"{theme.BULLET} Лимиты запуска: {esc(limit_profile_title(st.limit_profile, ctx.env_limits()))}",
+        f"{theme.BULLET} Таймаут запуска: {human_duration(s.CLAUDE_TIMEOUT_SEC)}",
+        f"{theme.BULLET} Авто-отчеты: {'вкл' if watcher_on else 'выкл'}",
+        f"{theme.BULLET} Голосовые: {esc_fit(voice, 200)}",
+        f"{theme.BULLET} Разрешенные папки:",
+        *(f"   <code>{esc_fit(str(root), 200)}</code>" for root in ctx.safe.roots),
+    ]
+    return theme.quote("\n".join(rows))
+
+
+def render_status(
+    ctx: AppContext, quota: QuotaResult | None = None, summary: UsageSummary | None = None,
+    now: float | None = None,
+) -> str:
+    now = time.time() if now is None else now
     runs = ctx.runner.active_runs
-    lines.append("")
     if runs:
-        lines.append(f"⚙️ <b>Активные процессы: {len(runs)}</b>")
-        for run in runs:
-            lines.append(
-                f"   • <code>{run.run_id}</code> · PID {run.pid or '?'} · {human_duration(run.elapsed)} · "
-                f"{esc_fit(run.activity, 120)}"
+        activity = [f"{theme.DOT_BUSY} <b>Claude работает</b>{theme.SEP}{theme.count(len(runs), 'запуск', 'запуска', 'запусков')}"]
+        activity += [
+            theme.item(
+                f"<code>{run.run_id}</code>{theme.SEP}{theme.duration(run.elapsed)}{theme.SEP}"
+                f"{esc(theme.folder_label(run.request.cwd))}{theme.SEP}{esc_fit(run.activity, 100)}"
             )
+            for run in runs
+        ]
     else:
-        lines.append("💤 Активных процессов нет")
-    return "\n".join(lines)
+        activity = [f"{theme.DOT_OK} <b>Claude свободен</b>"]
+    usage = [*quota_rows(quota, now)] if ctx.settings.USAGE_QUOTA_ENABLED else []
+    usage.append(spend_row(summary))
+    return fit_html(theme.join_blocks(
+        theme.lines(theme.title("Состояние"), theme.meta(theme.clock(now))),
+        theme.lines(*activity),
+        theme.lines(*context_rows(ctx)),
+        theme.lines(*usage),
+        _diagnostics(ctx),
+    ))
+
+
+async def build_status(ctx: AppContext) -> str:
+    quota, summary = await usage_snapshot(ctx)
+    return render_status(ctx, quota, summary)
+
+
+def status_markup(ctx: AppContext) -> InlineKeyboardMarkup:
+    return status_kb([r.run_id for r in ctx.runner.active_runs])
 
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, ctx: AppContext, state: FSMContext) -> None:
     await state.clear()
-    await message.answer(HELP_TEXT, reply_markup=main_reply_kb())
-    await message.answer(render_status(ctx, await usage_status_line(ctx)), reply_markup=main_inline_kb())
+    await message.answer(render_start(ctx), reply_markup=main_reply_kb())
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
-    await message.answer(HELP_TEXT, reply_markup=main_reply_kb())
+    await message.answer(render_help(), reply_markup=main_reply_kb())
 
 
 @router.message(Command("status"))
-@router.message(F.text == BTN_STATUS)
+@router.message(F.text.in_(STATUS_TEXTS))
 async def cmd_status(message: Message, ctx: AppContext, state: FSMContext) -> None:
     await state.clear()
-    await message.answer(
-        render_status(ctx, await usage_status_line(ctx)), reply_markup=status_kb([r.run_id for r in ctx.runner.active_runs])
-    )
+    await message.answer(await build_status(ctx), reply_markup=status_markup(ctx))
 
 
-@router.callback_query(MenuCb.filter(F.action == "status"))
+@router.callback_query(MenuCb.filter(F.action.in_({"status", "status_refresh"})))
 async def cb_status(call: CallbackQuery, ctx: AppContext) -> None:
-    await call.answer()
+    text = await build_status(ctx)
     if isinstance(call.message, Message):
-        await call.message.answer(
-            render_status(ctx, await usage_status_line(ctx)),
-            reply_markup=status_kb([r.run_id for r in ctx.runner.active_runs]),
-        )
+        try:
+            await call.message.edit_text(text, reply_markup=status_markup(ctx))
+        except TelegramBadRequest as exc:
+            if "not modified" not in exc.message:
+                await call.message.answer(text, reply_markup=status_markup(ctx))
+    await call.answer("🔄 Обновлено")
 
 
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
     had_state = await state.get_state() is not None
     await state.clear()
-    await message.answer("❌ Отменено" if had_state else "Нечего отменять", reply_markup=main_reply_kb())
+    await message.answer("✖️ Отменено" if had_state else "Нечего отменять", reply_markup=main_reply_kb())

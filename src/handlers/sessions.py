@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from pathlib import Path
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -14,7 +15,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup
 from src.context import AppContext
 from src.handlers.delivery import send_paths
 from src.keyboards.inline import (
-    BTN_SESSIONS,
+    SESSIONS_TEXTS,
     ProjCb,
     SessCb,
     paginate,
@@ -25,6 +26,7 @@ from src.keyboards.inline import (
 )
 from src.services.file_manager import PathAccessError
 from src.services.session_parser import (
+    REPORT_PUSH,
     SessionMeta,
     SessionReport,
     render_report_html,
@@ -32,26 +34,32 @@ from src.services.session_parser import (
 )
 from src.services.state import RunMode
 from src.utils.registry import TokenRegistry
-from src.utils.text import esc, esc_fit, fmt_short_dt, human_size, one_line, truncate, truncate_middle
+from src.handlers.delivery import send_html
+from src.ui import theme
+from src.ui.formatter import fit_html
+from src.utils.text import esc_fit, one_line, truncate
 
 log = logging.getLogger(__name__)
 router = Router(name="sessions")
 
 
 async def _show(target: Message | CallbackQuery, text: str, markup: InlineKeyboardMarkup | None) -> None:
-    """Edit the callback message in place, or answer a command with a new message."""
+    """Edit the callback message in place, or answer a command with a new message (both HTML-safe)."""
+    body = fit_html(text)
     if isinstance(target, CallbackQuery):
         if isinstance(target.message, Message):
             try:
-                await target.message.edit_text(text, reply_markup=markup)
+                await target.message.edit_text(body, reply_markup=markup)
                 return
             except TelegramBadRequest as exc:
                 if "not modified" in exc.message:
                     return
                 log.debug("edit failed, sending new message: %s", exc.message)
-            await target.message.answer(text, reply_markup=markup)
+            if target.bot is not None:
+                await send_html(target.bot, target.message.chat.id, body, markup)
         return
-    await target.answer(text, reply_markup=markup)
+    if target.bot is not None:
+        await send_html(target.bot, target.chat.id, body, markup)
 
 
 async def _project_key(ctx: AppContext, token: str) -> str | None:
@@ -69,29 +77,21 @@ async def _project_key(ctx: AppContext, token: str) -> str | None:
 async def show_projects(target: Message | CallbackQuery, ctx: AppContext, page: int = 0) -> None:
     projects = await ctx.inspector.list_projects()
     if not projects:
-        await _show(target, f"📭 В <code>{esc(ctx.settings.CLAUDE_PROJECTS_DIR)}</code> нет сессий Claude Code.", None)
+        await _show(target, theme.lines(theme.title("Проекты Claude Code"), theme.meta("Сессий Claude Code пока нет")), None)
         return
     size = ctx.settings.PROJECTS_PAGE_SIZE
-    items, page, pages = paginate(projects, page, size)
-    lines = [f"📂 <b>Проекты Claude Code</b> ({len(projects)}) · стр. {page + 1}/{pages}", ""]
-    for index, project in enumerate(items, start=page * size + 1):
-        lock = "" if ctx.safe.is_allowed(project.display_path) else " 🔒"
-        approx = "" if project.exact else " <i>(путь восстановлен приблизительно)</i>"
-        lines.append(f"{index}. <code>{esc_fit(project.display_path, 200)}</code>{lock}{approx}")
-        lines.append(f"    💬 {project.session_count} · 🕒 {fmt_short_dt(project.last_mtime)}")
-    lines.append("")
-    lines.append("<i>🔒 - папка вне ALLOWED_DIRS: отчеты доступны, запуск Claude нет.</i>")
-    markup = projects_kb(projects, page, size, ctx.tokens, ctx.safe.is_allowed)
-    await _show(target, "\n".join(lines), markup)
-
-
-def _session_line(index: int, meta: SessionMeta, active_sid: str | None) -> str:
-    star = "⭐ " if meta.session_id == active_sid else ""
-    headless = " 🤖" if (meta.entrypoint or "").startswith("sdk") else ""
-    return (
-        f"{index}. {star}<b>{esc_fit(truncate(one_line(meta.title), 80), 200)}</b>{headless}\n"
-        f"    🕒 {fmt_short_dt(meta.mtime)} · {human_size(meta.size)} · <code>{esc(meta.session_id[:8])}</code>"
+    _, page, pages = paginate(projects, page, size)
+    locked = any(not ctx.safe.is_allowed(p.display_path) for p in projects)
+    pager = f"стр. {page + 1} из {pages}" if pages > 1 else None
+    text = theme.join_blocks(
+        theme.lines(
+            theme.title("Проекты Claude Code"),
+            theme.meta(theme.count(len(projects), "проект", "проекта", "проектов"), pager, "новые сверху"),
+        ),
+        theme.meta("🔒 — папка вне ALLOWED_DIRS: отчеты доступны, запуск Claude нет") if locked else "",
     )
+    markup = projects_kb(projects, page, size, ctx.tokens, ctx.safe.is_allowed)
+    await _show(target, text, markup)
 
 
 async def show_sessions(target: Message | CallbackQuery, ctx: AppContext, key: str, page: int = 0) -> None:
@@ -99,19 +99,22 @@ async def show_sessions(target: Message | CallbackQuery, ctx: AppContext, key: s
     cwd = await ctx.inspector.project_path(key) or key
     can_run = ctx.safe.is_allowed(cwd)
     size = ctx.settings.SESSIONS_PAGE_SIZE
-    items, page, pages = paginate(sessions, page, size)
-    lines = [
-        f"📁 <b>{esc_fit(truncate_middle(cwd, 120), 300)}</b>",
-        f"💬 Сессий: {len(sessions)} · стр. {page + 1}/{pages}" + ("" if can_run else " · 🔒 вне ALLOWED_DIRS"),
-        "",
-    ]
-    for index, meta in enumerate(items, start=page * size + 1):
-        lines.append(_session_line(index, meta, ctx.state.active_session_id))
-    if any((m.entrypoint or "").startswith("sdk") for m in items):
-        lines.append("\n<i>🤖 - headless-запуск (claude -p)</i>")
+    _, page, pages = paginate(sessions, page, size)
+    active = next((m for m in sessions if m.session_id == ctx.state.active_session_id), None)
+    pager = f"стр. {page + 1} из {pages}" if pages > 1 else None
+    text = theme.join_blocks(
+        theme.lines(
+            theme.title(theme.folder_label(cwd)),
+            theme.meta(
+                theme.count(len(sessions), "чат", "чата", "чатов"), pager,
+                None if can_run else "🔒 вне ALLOWED_DIRS",
+            ),
+        ),
+        theme.item(f"⭐ Текущий чат: <b>{esc_fit(one_line(active.title), 80)}</b>") if active else "",
+    )
     token = ctx.tokens.put(key)
     markup = sessions_kb(sessions, token, page, size, ctx.state.active_session_id, can_run)
-    await _show(target, "\n".join(lines), markup)
+    await _show(target, text, markup)
 
 
 async def _load_report(ctx: AppContext, sid: str) -> tuple[SessionMeta, SessionReport] | None:
@@ -125,7 +128,7 @@ async def _load_report(ctx: AppContext, sid: str) -> tuple[SessionMeta, SessionR
 
 
 @router.message(Command("sessions"))
-@router.message(F.text == BTN_SESSIONS)
+@router.message(F.text.in_(SESSIONS_TEXTS))
 async def cmd_sessions(message: Message, ctx: AppContext, state: FSMContext) -> None:
     await state.clear()
     await show_projects(message, ctx)
@@ -163,15 +166,21 @@ async def cb_project_cwd(call: CallbackQuery, callback_data: ProjCb, ctx: AppCon
     await ctx.store.update(active_cwd=str(cwd), run_mode=mode)
     await call.answer("🎯 Рабочая папка выбрана")
     if isinstance(call.message, Message):
-        await call.message.answer(
-            f"🎯 Рабочая папка: <code>{esc_fit(str(cwd), 300)}</code>\n"
-            f"Режим: {'продолжить последний чат' if mode == RunMode.CONTINUE else 'новый чат'}. "
-            "Напишите задачу для Claude."
-        )
+        await call.message.answer(working_folder_text(cwd, mode))
+
+
+def working_folder_text(cwd: Path, mode: RunMode) -> str:
+    """Confirmation after 🎯: the folder name, what the next message does, the full path for reference."""
+    action = "продолжит последний чат папки" if mode == RunMode.CONTINUE else "начнет новый чат"
+    return theme.lines(
+        theme.title(theme.folder_label(cwd), marker="🎯"),
+        theme.meta(f"Рабочая папка выбрана · следующее сообщение {action}"),
+        f"<code>{esc_fit(str(cwd), 300)}</code>",
+    )
 
 
 @router.callback_query(SessCb.filter(F.action.in_({"open", "view"})))
-async def cb_session_open(call: CallbackQuery, callback_data: SessCb, ctx: AppContext) -> None:
+async def cb_session_open(call: CallbackQuery, callback_data: SessCb, bot: Bot, ctx: AppContext) -> None:
     loaded = await _load_report(ctx, callback_data.sid)
     if loaded is None:
         await call.answer("Сессия не найдена", show_alert=True)
@@ -179,10 +188,10 @@ async def cb_session_open(call: CallbackQuery, callback_data: SessCb, ctx: AppCo
     await call.answer()
     meta, report = loaded
     can_run = ctx.safe.is_allowed(report.cwd or meta.cwd or "")
-    markup = session_report_kb(meta.session_id, ctx.tokens.put(meta.project_key), bool(report.files), can_run)
+    markup = session_report_kb(meta.session_id, ctx.tokens.put(meta.project_key), len(report.files), can_run)
     text = render_report_html(report)
-    if callback_data.action == "view" and isinstance(call.message, Message):
-        await call.message.answer(text, reply_markup=markup)
+    if callback_data.action == "view":
+        await send_html(bot, call.from_user.id, text, markup)
         return
     await _show(call, text, markup)
 
@@ -209,30 +218,32 @@ async def cb_session_resume(call: CallbackQuery, callback_data: SessCb, ctx: App
     )
     await call.answer("▶️ Чат выбран")
     if isinstance(call.message, Message):
-        await call.message.answer(
-            f"▶️ Следующее сообщение продолжит чат «<b>{esc(title)}</b>»\n"
-            f"🆔 <code>{esc(meta.session_id)}</code>\n📁 <code>{esc_fit(str(cwd), 300)}</code>\n\n"
-            "Напишите задачу для Claude (будет запущено <code>claude -p --resume</code>)."
-        )
+        await call.message.answer(theme.lines(
+            theme.title(title, marker="▶️"),
+            theme.meta(f"Рабочая папка: {theme.folder_label(cwd)}", "чат выбран"),
+            "",
+            theme.item("Следующее сообщение продолжит этот чат"),
+        ))
 
 
 @router.callback_query(SessCb.filter(F.action == "md"))
 async def cb_session_md(call: CallbackQuery, callback_data: SessCb, ctx: AppContext) -> None:
-    await call.answer("⏳ Формирую отчет...")
+    await call.answer("⏳ Формирую отчет…")
     loaded = await _load_report(ctx, callback_data.sid)
     if loaded is None or not isinstance(call.message, Message):
         return
     _, report = loaded
     data = render_report_markdown(report).encode("utf-8")
+    name = report.title or theme.folder_label(report.cwd)
     await call.message.answer_document(
         BufferedInputFile(data, filename=f"session_{report.session_id[:8]}.md"),
-        caption=f"📄 Полный отчет: {esc_fit(report.title or report.session_id, 200)}",
+        caption=f"📄 <b>Полный отчет</b>\n{theme.meta(truncate(name, 200))}",
     )
 
 
 @router.callback_query(SessCb.filter(F.action == "files"))
 async def cb_session_files(call: CallbackQuery, callback_data: SessCb, bot: Bot, ctx: AppContext) -> None:
-    await call.answer("⏳ Собираю файлы...")
+    await call.answer("⏳ Собираю файлы…")
     loaded = await _load_report(ctx, callback_data.sid)
     if loaded is None:
         return
@@ -245,6 +256,5 @@ async def cb_session_files(call: CallbackQuery, callback_data: SessCb, bot: Bot,
 
 
 async def push_session_report(bot: Bot, chat_id: int, report: SessionReport) -> None:
-    """Used by the watcher: short push after the user worked in PowerShell on the PC."""
-    text = render_report_html(report, header="🔔 Сессия Claude обновилась на ПК")
-    await bot.send_message(chat_id, text, reply_markup=push_report_kb(report.session_id, bool(report.files)))
+    """Used by the watcher: a compact card after the user worked with Claude on the PC."""
+    await send_html(bot, chat_id, render_report_html(report, kind=REPORT_PUSH), push_report_kb(report.session_id))

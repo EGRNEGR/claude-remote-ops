@@ -19,7 +19,7 @@ from src.context import AppContext
 from src.handlers.delivery import send_file
 from src.handlers.runner import build_request, launch_run
 from src.keyboards.inline import (
-    BTN_FILES,
+    FILES_TEXTS,
     REPLY_BUTTONS,
     FileCb,
     MenuCb,
@@ -35,7 +35,9 @@ from src.keyboards.inline import (
 )
 from src.services.file_manager import PathAccessError
 from src.services.state import RunMode
-from src.utils.text import esc, esc_fit, fmt_dt, human_size, truncate
+from src.handlers.sessions import working_folder_text
+from src.ui import theme
+from src.utils.text import esc, esc_fit, human_size, truncate
 from src.utils.winpath import is_within, long_path, normcase, sanitize_filename, unique_path
 
 log = logging.getLogger(__name__)
@@ -81,7 +83,7 @@ async def show_roots(target: Message | CallbackQuery, ctx: AppContext) -> None:
     if len(roots) == 1:
         await show_dir(target, ctx, roots[0], 0)
         return
-    text = "🗂 <b>Разрешенные папки</b>\n\n" + "\n".join(f"💽 <code>{esc(r)}</code>" for r in roots)
+    text = theme.lines(theme.title("Файлы"), theme.meta(theme.count(len(roots), "разрешенная папка", "разрешенные папки", "разрешенных папок")))
     await _render(target, text, roots_kb(roots, ctx.tokens))
 
 
@@ -91,18 +93,21 @@ async def show_dir(target: Message | CallbackQuery, ctx: AppContext, path: Path,
     files = len(listing.entries) - dirs
     size = ctx.settings.FILES_PAGE_SIZE
     _, page, pages = paginate(listing.entries, page, size)
-    lines = [f"🗂 <code>{esc_fit(str(listing.path), 600)}</code>"]
-    summary = f"📁 {dirs} · 📄 {files}"
-    if pages > 1:
-        summary += f" · стр. {page + 1}/{pages}"
-    if listing.skipped:
-        summary += f" · скрыто: {listing.skipped}"
-    lines.append(summary)
     active = ctx.active_cwd()
-    if active is not None and normcase(active) == normcase(listing.path):
-        lines.append("🎯 <i>Это текущая рабочая папка Claude</i>")
+    is_active = active is not None and normcase(active) == normcase(listing.path)
+    lines = [
+        theme.title(listing.path.name or str(listing.path), marker="🎯" if is_active else "📁"),
+        theme.meta(
+            theme.count(dirs, "папка", "папки", "папок"),
+            theme.count(files, "файл", "файла", "файлов"),
+            f"стр. {page + 1} из {pages}" if pages > 1 else None,
+            f"скрыто {listing.skipped}" if listing.skipped else None,
+            "рабочая папка Claude" if is_active else None,
+        ),
+        f"<code>{esc_fit(str(listing.path), 600)}</code>",
+    ]
     if listing.error:
-        lines.append(f"⚠️ {esc(listing.error)}")
+        lines.append(f"{theme.DOT_ERROR} {esc(listing.error)}")
     if not listing.entries and not listing.error:
         lines.append("<i>Папка пуста</i>")
     dir_token = ctx.token(listing.path)
@@ -114,19 +119,19 @@ async def show_dir(target: Message | CallbackQuery, ctx: AppContext, path: Path,
 async def show_file(target: Message | CallbackQuery, ctx: AppContext, path: Path) -> None:
     real = ctx.safe.resolve_file(path)
     st = await asyncio.to_thread(os.stat, long_path(real))
-    text = (
-        f"📄 <b>{esc_fit(real.name, 300)}</b>\n"
-        f"📁 <code>{esc_fit(str(real.parent), 600)}</code>\n"
-        f"💾 {human_size(st.st_size)} · 🕒 {fmt_dt(st.st_mtime)}"
+    text = theme.lines(
+        theme.title(real.name, marker="📄"),
+        theme.meta(theme.folder_label(real.parent), human_size(st.st_size), theme.clock(st.st_mtime)),
+        f"<code>{esc_fit(str(real), 600)}</code>",
     )
     if st.st_size > ctx.settings.max_send_bytes:
-        text += f"\n⚠️ Больше лимита отправки ({ctx.settings.MAX_SEND_FILE_MB} МБ)"
+        text += f"\n{theme.DOT_BUSY} Больше лимита отправки ({ctx.settings.MAX_SEND_FILE_MB} МБ)"
     parent_token = ctx.token(real.parent)
     await _render(target, text, file_actions_kb(ctx.token(real), parent_token, ctx.settings.PREVIEW_LINES))
 
 
 @router.message(Command("files"))
-@router.message(F.text == BTN_FILES)
+@router.message(F.text.in_(FILES_TEXTS))
 async def cmd_files(message: Message, ctx: AppContext, state: FSMContext) -> None:
     await state.clear()
     await show_roots(message, ctx)
@@ -175,20 +180,15 @@ async def cb_file_action(
             await answer()
             await bot.send_message(
                 call.from_user.id,
-                f"🤖 Напишите вопрос или задачу для Claude по файлу <code>{esc_fit(real.name, 300)}</code>",
+                theme.lines(theme.title(real.name, marker="🤖"), theme.meta("Напишите вопрос или задачу для Claude по файлу")),
                 reply_markup=cancel_kb(),
             )
         elif action == "cwd":
             real = ctx.safe.resolve_dir(path)
             mode = ctx.state.run_mode if ctx.state.run_mode == RunMode.CONTINUE else RunMode.NEW
             await ctx.store.update(active_cwd=str(real), run_mode=mode)
-            await answer("📌 Рабочая папка выбрана")
-            await bot.send_message(
-                call.from_user.id,
-                f"📌 Рабочая папка Claude: <code>{esc_fit(str(real), 600)}</code>\n"
-                f"Режим: {'продолжить последний чат' if mode == RunMode.CONTINUE else 'новый чат'}. "
-                "Напишите задачу.",
-            )
+            await answer("🎯 Рабочая папка выбрана")
+            await bot.send_message(call.from_user.id, working_folder_text(real, mode))
     except PathAccessError as exc:
         if answered:
             await bot.send_message(call.from_user.id, f"🔒 {esc(exc)}")
@@ -200,16 +200,18 @@ async def _send_preview(bot: Bot, chat_id: int, ctx: AppContext, path: Path) -> 
     result = await ctx.files.preview(path, ctx.settings.PREVIEW_LINES)
     name = esc_fit(path.name, 200)
     if result.is_binary:
-        await bot.send_message(chat_id, f"👁 <b>{name}</b>: бинарный файл ({human_size(result.size)}), предпросмотр недоступен.")
+        await bot.send_message(chat_id, f"👁 <b>{name}</b>\n{theme.meta(f'бинарный файл, {human_size(result.size)}', 'предпросмотр недоступен')}")
         return
     if not result.text.strip():
-        await bot.send_message(chat_id, f"👁 <b>{name}</b>: файл пуст.")
+        await bot.send_message(chat_id, f"👁 <b>{name}</b>\n{theme.meta('файл пуст')}")
         return
     lang = _LANGS.get(path.suffix.lower())
     body = esc(result.text)
     code = f'<pre><code class="language-{lang}">{body}</code></pre>' if lang else f"<pre>{body}</pre>"
-    tail = " · показано не все" if result.truncated else ""
-    header = f"👁 <b>{name}</b> · {result.lines_shown} строк · {esc(result.encoding)}{tail}\n"
+    header = theme.lines(
+        f"👁 <b>{name}</b>",
+        theme.meta(f"{result.lines_shown} строк", result.encoding, "показано не все" if result.truncated else None),
+    ) + "\n"
     await bot.send_message(chat_id, header + code)
 
 

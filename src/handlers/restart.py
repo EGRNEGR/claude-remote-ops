@@ -11,17 +11,18 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, Update
 
 from src.context import AppContext
-from src.handlers.common import render_status
-from src.handlers.usage import usage_status_line
-from src.keyboards.inline import MenuCb, restart_confirm_kb, status_kb
+from src.handlers.common import build_status, status_markup
+from src.keyboards.inline import MenuCb, restart_confirm_kb
 from src.services.restarter import RestartRequest
+from src.ui import theme
+from src.ui.formatter import fit_html
 from src.utils.text import esc_fit
 
 log = logging.getLogger(__name__)
 router = Router(name="restart")
 
-RESTARTING_TEXT = "🔄 Перезапускаю бота..."
-RESTARTED_TEXT = "✅ Бот перезапущен и готов к работе!"
+RESTARTING_TEXT = "♻️ <b>Перезапускаю бота…</b>"
+RESTARTED_TEXT = "🟢 <b>Бот перезапущен и готов к работе</b>"
 
 
 @router.message(Command("restart"))
@@ -50,14 +51,18 @@ async def request_restart(bot: Bot, ctx: AppContext, chat_id: int, update_id: in
         log.info("Ignoring update %s: it is the /restart that started this process", update_id)
         return
     if ctx.restarter.in_progress:
-        await bot.send_message(chat_id, "⏳ Перезапуск уже выполняется...")
+        await bot.send_message(chat_id, "⏳ Перезапуск уже выполняется…")
         return
     runs = ctx.runner.active_runs
     if runs and not force:
         await bot.send_message(
             chat_id,
-            f"⚠️ Сейчас работает Claude: процессов {len(runs)}. Перезапуск остановит их "
-            "(<code>taskkill /F /T</code>), незавершенная работа прервется.\n\nПерезапустить бота?",
+            theme.lines(
+                f"{theme.DOT_BUSY} <b>Сейчас работает Claude: процессов {len(runs)}</b>",
+                theme.meta("Перезапуск остановит их (taskkill /F /T), незавершенная работа прервется"),
+                "",
+                "Перезапустить бота?",
+            ),
             reply_markup=restart_confirm_kb(),
         )
         return
@@ -69,11 +74,12 @@ async def _hand_over(bot: Bot, ctx: AppContext, chat_id: int, message_id: int, u
     result = await ctx.restarter.hand_over(chat_id, message_id, update_id)
     if result.ok:
         return
-    text = (
-        "❌ <b>Перезапуск отменен</b>\n"
-        f"<pre>{esc_fit(result.detail, 1500)}</pre>\n"
-        "Бот продолжает работать в текущем процессе. Подробности: <code>logs/bot.log</code>, "
-        "<code>logs/restart_stderr.log</code>"
+    text = theme.join_blocks(
+        theme.lines(
+            f"{theme.DOT_ERROR} <b>Перезапуск отменен</b>",
+            theme.meta("Бот продолжает работать в текущем процессе", "логи: logs/bot.log, logs/restart_stderr.log"),
+        ),
+        theme.quote(f"<pre>{esc_fit(result.detail, 1500)}</pre>"),
     )
     try:
         await bot.edit_message_text(text, chat_id=chat_id, message_id=message_id)
@@ -82,9 +88,9 @@ async def _hand_over(bot: Bot, ctx: AppContext, chat_id: int, message_id: int, u
 
 
 async def announce_restart(bot: Bot, ctx: AppContext, request: RestartRequest) -> None:
-    """New process: turn "🔄 Перезапускаю бота..." into the ready notice with the current status."""
-    text = f"{RESTARTED_TEXT}\n\n{render_status(ctx, await usage_status_line(ctx))}"
-    markup = status_kb([r.run_id for r in ctx.runner.active_runs])
+    """New process: turn "♻️ Перезапускаю бота…" into the ready notice with the current status."""
+    text = fit_html(f"{RESTARTED_TEXT}\n\n{await build_status(ctx)}")
+    markup = status_markup(ctx)
     if request.message_id is not None:
         try:
             await bot.edit_message_text(text, chat_id=request.chat_id, message_id=request.message_id, reply_markup=markup)

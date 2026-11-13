@@ -35,18 +35,19 @@ from pathlib import Path
 
 import aiofiles
 
+from src.services.pricing import request_cost
+from src.ui import theme
+from src.ui.formatter import answer_parts, tg_size
 from src.utils.text import (
     TG_SAFE_LIMIT,
     esc,
     fmt_cost,
     fmt_dt,
-    human_duration,
     one_line,
     parse_iso,
     truncate,
-    truncate_middle,
 )
-from src.utils.winpath import is_within, long_path, normcase, retry_on_lock
+from src.utils.winpath import long_path, normcase, retry_on_lock
 
 log = logging.getLogger(__name__)
 
@@ -202,6 +203,9 @@ class SessionReport:
     started_at: datetime | None = None
     ended_at: datetime | None = None
     end_offset: int = 0
+    last_model: str | None = None
+    # Recomputed from message.usage with the CLI price catalog (covers this report's part of the transcript).
+    estimated_cost: float | None = None
 
     @property
     def has_activity(self) -> bool:
@@ -210,6 +214,20 @@ class SessionReport:
     @property
     def is_headless(self) -> bool:
         return (self.entrypoint or "") in _HEADLESS_ENTRYPOINTS
+
+    @property
+    def display_cost(self) -> float | None:
+        """Cost for the card: the CLI's own total when final, else the estimate from tokens.
+
+        A delta report (watcher push) covers only the new part of the transcript, so the cumulative
+        cost-state of the whole session would overstate it: the estimate is used there.
+        """
+        if self.is_delta:
+            return self.estimated_cost
+        if self.cost_usd is not None and self.cost_is_final:
+            return self.cost_usd
+        known = [c for c in (self.cost_usd, self.estimated_cost) if c is not None]
+        return max(known) if known else None
 
     @property
     def duration_sec(self) -> float | None:
@@ -236,6 +254,8 @@ class ReportBuilder:
         self._seen_messages: set[str] = set()
         self._seen_blocks: set[tuple[str, int]] = set()
         self._usage: dict[str, TokenUsage] = {}
+        self._models: dict[str, str] = {}
+        self._writes: dict[str, tuple[int, int]] = {}
         self._last_text_mid: str | None = None
         self._final_parts: list[str] = []
         self._assistant_seq = 0
@@ -318,6 +338,8 @@ class ReportBuilder:
         model = message.get("model")
         if isinstance(model, str) and model and not model.startswith("<"):
             r.models.add(model)
+            r.last_model = model
+            self._models[mid] = model
         usage = message.get("usage")
         if isinstance(usage, dict):
             current = self._usage.setdefault(mid, TokenUsage())
@@ -327,6 +349,11 @@ class ReportBuilder:
             current.cache_creation = max(
                 current.cache_creation, int(usage.get("cache_creation_input_tokens") or 0)
             )
+            split = usage.get("cache_creation") if isinstance(usage.get("cache_creation"), dict) else {}
+            w1h = int(split.get("ephemeral_1h_input_tokens") or 0)
+            old_5m, old_1h = self._writes.get(mid, (0, 0))
+            w1h = max(old_1h, min(w1h, current.cache_creation))
+            self._writes[mid] = (max(old_5m, current.cache_creation - w1h), w1h)
         content = message.get("content")
         if not isinstance(content, list):
             return
@@ -369,8 +396,23 @@ class ReportBuilder:
             tokens.cache_read += usage.cache_read
             tokens.cache_creation += usage.cache_creation
         r.tokens = tokens
+        r.estimated_cost = self._estimate_cost()
         r.cost_is_final = r.cost_usd is not None and self._cost_seq >= self._assistant_seq
         return r
+
+
+    def _estimate_cost(self) -> float | None:
+        total = 0.0
+        priced = False
+        for mid, usage in self._usage.items():
+            w5m, w1h = self._writes.get(mid, (usage.cache_creation, 0))
+            cost = request_cost(
+                self._models.get(mid), usage.input, usage.output, usage.cache_read, w5m, w1h
+            )
+            if cost is not None and mid in self._models:
+                total += cost
+                priced = True
+        return total if priced else None
 
 
 def _decode_lines(data: bytes) -> list[dict]:
@@ -657,120 +699,74 @@ class SessionInspector:
 
 # ---------- rendering ----------
 
-def _rel_path(raw: str, cwd: str | None) -> str:
-    path = Path(raw)
-    if cwd and path.is_absolute() and is_within(path, Path(cwd)):
-        try:
-            return os.path.relpath(path, cwd)
-        except ValueError:
-            return raw
-    return raw
+REPORT_VIEW = "view"
+REPORT_PUSH = "push"
+_PROMPT_LIMIT = 300
 
 
 def _ops_label(ops: Counter[str]) -> str:
     return ", ".join(f"{FILE_TOOLS.get(name, name)}×{count}" for name, count in ops.items())
 
 
-def _compose_html(
-    r: SessionReport,
-    header: str,
-    answer_budget: int,
-    prompt_budget: int,
-    max_files: int,
-    max_cmds: int,
-) -> str:
-    lines: list[str] = [f"<b>{esc(header)}</b>"]
-    if r.title:
-        lines.append(f"🏷 <b>{esc(truncate(r.title, 120))}</b>")
-    place = f"📁 <code>{esc(truncate_middle(r.cwd or r.project_key, 90))}</code>"
-    if r.git_branch and r.git_branch != "HEAD":
-        place += f" · 🌿 {esc(truncate(r.git_branch, 40))}"
-    lines.append(place)
-    lines.append(f"🆔 <code>{esc(r.session_id)}</code>")
-    if r.started_at:
-        period = f"🕒 {fmt_dt(r.started_at)}"
-        if r.ended_at and r.ended_at != r.started_at:
-            same_day = r.started_at.astimezone().date() == r.ended_at.astimezone().date()
-            period += f" → {fmt_dt(r.ended_at, with_date=not same_day)}"
-            if r.duration_sec is not None:
-                period += f" ({human_duration(r.duration_sec)})"
-        lines.append(period)
+def report_head(r: SessionReport, kind: str = REPORT_VIEW) -> str:
+    """✦ title, muted place/time line and the user's request. No paths of the CLI cache, no session id."""
+    folder = theme.folder_label(r.cwd) if r.cwd else "проект"
+    when = theme.clock(r.ended_at or r.started_at)
+    origin = "Обновление на ПК" if kind == REPORT_PUSH else None
+    branch = r.git_branch if r.git_branch and r.git_branch not in ("HEAD", "main", "master") else None
+    head = theme.lines(
+        theme.title(r.title or folder),
+        theme.meta(origin, f"Рабочая папка: {folder}", branch and f"ветка {truncate(branch, 30)}", when),
+    )
+    if not r.prompts:
+        return head
 
-    lines.append("")
-    if r.prompts:
-        label = "🙋 <b>Запрос (продолжение сессии):</b>" if r.is_delta else "🙋 <b>Запрос пользователя:</b>"
-        lines.append(label)
-        lines.append(f"<blockquote expandable>{esc(truncate(r.prompts[0], prompt_budget))}</blockquote>")
-        if len(r.prompts) > 1:
-            lines.append(f"↪️ <b>Последний запрос</b> (всего запросов: {len(r.prompts)}):")
-            lines.append(
-                f"<blockquote expandable>{esc(truncate(r.prompts[-1], max(120, prompt_budget // 2)))}</blockquote>"
-            )
-    else:
-        lines.append("🙋 Новых запросов пользователя нет")
+    def line(label: str, text: str, limit: int) -> str:
+        return f"<b>{label}:</b> <i>{esc(truncate(one_line(text), limit))}</i>"
 
-    if r.files:
-        lines.append("")
-        lines.append(f"📝 <b>Затронутые файлы ({len(r.files)}):</b>")
-        for raw, ops in list(r.files.items())[:max_files]:
-            rel = truncate_middle(_rel_path(raw, r.cwd), 80)
-            lines.append(f"• <code>{esc(rel)}</code> <i>({esc(_ops_label(ops))})</i>")
-        if len(r.files) > max_files:
-            lines.append(f"<i>… и еще {len(r.files) - max_files}</i>")
+    # A push is about the new part only; a full report keeps the original task and the latest request.
+    if kind == REPORT_PUSH or len(r.prompts) == 1:
+        return theme.join_blocks(head, line("Запрос", r.prompts[-1], _PROMPT_LIMIT))
+    requests = theme.lines(
+        line("Запрос", r.prompts[0], _PROMPT_LIMIT * 2 // 3),
+        line(f"Последний запрос <i>({len(r.prompts)}-й)</i>", r.prompts[-1], _PROMPT_LIMIT * 2 // 3),
+    )
+    return theme.join_blocks(head, requests)
 
-    if r.commands:
-        lines.append("")
-        lines.append(f"⚙️ <b>Команды терминала ({len(r.commands)}):</b>")
-        shown = r.commands[-max_cmds:]
-        if len(r.commands) > max_cmds:
-            lines.append(f"<i>… ранее еще {len(r.commands) - max_cmds}</i>")
-        for tool, command in shown:
-            prefix = "PS> " if tool == "PowerShell" else ("! " if tool == "!" else "$ ")
-            lines.append(f"• <code>{esc(prefix + truncate(one_line(command), 110))}</code>")
 
-    lines.append("")
-    if r.final_answer:
-        lines.append("💬 <b>Итоговый ответ ассистента:</b>")
-        lines.append(f"<blockquote expandable>{esc(truncate(r.final_answer, answer_budget))}</blockquote>")
-    else:
-        lines.append("💬 Текстового ответа ассистента нет")
-
-    stats = [f"👣 Шагов: {r.assistant_messages}", f"🔧 инструментов: {r.tool_calls}"]
-    if r.tool_errors:
-        stats.append(f"❗ ошибок: {r.tool_errors}")
+def report_footer(r: SessionReport) -> str:
+    """`Opus 5.5 · 45 сек · ~$0.18` (+ a note when the work was interrupted or tools failed)."""
+    notes = []
     if r.interrupted:
-        stats.append(f"⛔ прерываний: {r.interrupted}")
-    lines.append(" · ".join(stats))
-    if r.cost_usd is not None:
-        cost_line = f"💵 Стоимость сессии: <b>{fmt_cost(r.cost_usd)}</b>"
-        if not r.cost_is_final:
-            cost_line += " <i>(на момент последнего сохранения, сессия продолжается)</i>"
+        notes.append("прервано")
+    if r.tool_errors:
+        notes.append(theme.count(r.tool_errors, "ошибка инструмента", "ошибки инструментов", "ошибок инструментов"))
+    return theme.meta(
+        theme.model_name(r.last_model),
+        theme.duration(r.duration_sec) if r.duration_sec else None,
+        theme.money(r.display_cost),
+        *notes,
+    )
+
+
+def render_report_html(r: SessionReport, kind: str = REPORT_VIEW, limit: int = TG_SAFE_LIMIT) -> str:
+    """One-message card for a session (or the new part of it). Always fits into `limit`."""
+    head = report_head(r, kind)
+    footer = report_footer(r)
+    if r.final_answer:
+        budget = limit - tg_size(head) - tg_size(footer) - 8
+        parts = answer_parts(r.final_answer, budget, budget)
+        body = parts[0] if parts else ""
+        if len(parts) > 1:
+            more = "в полном отчете" if kind == REPORT_VIEW else "в «Подробнее»"
+            note = theme.item(f"<i>Ответ сокращен, целиком {more}</i>")
+            parts = answer_parts(r.final_answer, budget - tg_size(note) - 2, budget)
+            body = theme.join_blocks(parts[0] if parts else "", note)
+    elif r.assistant_messages:
+        body = theme.item("<i>Claude еще работает, текстового ответа пока нет</i>")
     else:
-        cost_line = "💵 Стоимость: <i>CLI еще не записал cost-state (сессия активна)</i>"
-    lines.append(cost_line)
-    t = r.tokens
-    if t.total:
-        lines.append(
-            f"🔤 Токены: вход {t.input:,} · выход {t.output:,} · кэш {t.cache_read + t.cache_creation:,}".replace(",", " ")
-        )
-    if r.models:
-        lines.append(f"🧠 {esc(', '.join(sorted(r.models)))}")
-    return "\n".join(lines)
-
-
-def render_report_html(r: SessionReport, header: str = "📊 Отчет по сессии", limit: int = TG_SAFE_LIMIT) -> str:
-    """Telegram HTML report that always fits into one message."""
-    answer_budget, prompt_budget, max_files, max_cmds = 1400, 600, 15, 10
-    text = ""
-    for _ in range(8):
-        text = _compose_html(r, header, answer_budget, prompt_budget, max_files, max_cmds)
-        if len(text) <= limit:
-            return text
-        answer_budget = max(150, int(answer_budget * 0.6))
-        prompt_budget = max(120, int(prompt_budget * 0.7))
-        max_files = max(3, max_files - 4)
-        max_cmds = max(3, max_cmds - 3)
-    return _compose_html(r, header, 100, 100, 2, 2)
+        body = ""
+    return theme.join_blocks(head, body, footer)
 
 
 def render_report_markdown(r: SessionReport) -> str:

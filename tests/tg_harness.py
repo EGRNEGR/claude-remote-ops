@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -19,6 +20,27 @@ from aiogram.types import Audio, CallbackQuery, Chat, Document, File, Message, U
 from src.context import AppContext
 from src.handlers import common, files, model, restart, runner, sessions, usage, voice
 from src.middlewares.auth import AuthMiddleware
+from src.ui.formatter import visible_text
+
+
+@dataclass(frozen=True)
+class Card:
+    """Final card of a Claude run as the user sees it: visible text, raw HTML and the keyboard."""
+
+    text: str
+    html: str
+    reply_markup: Any
+
+
+def run_cards(calls: list[TelegramMethod[Any]]) -> list[Card]:
+    """Final run cards (header + «Запрос:» + answer quote) among the recorded Bot API calls."""
+    cards = []
+    for call in calls:
+        text = getattr(call, "text", None) or ""
+        if isinstance(call, SendMessage) and "<b>Запрос:</b>" in text and "Сейчас:" not in text:
+            cards.append(Card(visible_text(text), text, call.reply_markup))
+    return cards
+
 
 ADMIN = 42
 STRANGER = 666

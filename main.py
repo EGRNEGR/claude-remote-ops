@@ -25,6 +25,7 @@ from src.services.quota_pin import QuotaPin
 from src.services.restarter import LAUNCHER_ENV, PS1_LAUNCHER
 from src.services.session_parser import SessionReport
 from src.services.watcher import SessionWatcher
+from src.ui import theme
 from src.utils.single_instance import InstanceLock
 from src.utils.text import esc_fit, human_duration
 from src.utils.winpath import long_path
@@ -40,7 +41,7 @@ BOT_COMMANDS = [
     BotCommand(command="sessions", description="Проекты и сессии Claude"),
     BotCommand(command="files", description="Файловый менеджер"),
     BotCommand(command="get", description="Найти и скачать файл"),
-    BotCommand(command="mode", description="Режим запуска Claude"),
+    BotCommand(command="mode", description="Настройки запуска Claude"),
     BotCommand(command="model", description="Модель и уровень ризонинга"),
     BotCommand(command="effort", description="Ризонинг: off|low|medium|high|max|auto"),
     BotCommand(command="new", description="Новый чат в рабочей папке"),
@@ -122,9 +123,11 @@ async def on_startup(bot: Bot, ctx: AppContext) -> None:
     try:
         await bot.send_message(
             admin_id,
-            "🟢 <b>claude-remote-ops запущен</b>\n"
-            f"🤖 Claude CLI: <code>{esc_fit(claude, 300)}</code>\n"
-            f"👁 Авто-отчеты: {esc_fit(watcher_note, 200)}\n/start - меню",
+            theme.lines(
+                f"{theme.DOT_OK} <b>claude-remote-ops запущен</b>",
+                theme.meta(f"авто-отчеты: {watcher_note}", "/start — меню"),
+                f"<code>{esc_fit(claude, 300)}</code>",
+            ),
         )
     except TelegramAPIError as exc:
         log.warning("Cannot notify admin (send /start to the bot first): %s", exc)
@@ -143,9 +146,9 @@ async def on_shutdown(bot: Bot, ctx: AppContext) -> None:
     if ctx.restarter.handed_over:
         log.info("Polling handed over to the new process")
         return
-    notice = "🔴 claude-remote-ops остановлен"
+    notice = f"{theme.DOT_ERROR} <b>claude-remote-ops остановлен</b>"
     if ctx.netwatch is not None and ctx.netwatch.triggered:
-        notice = "🔄 Связь с Telegram зависла, перезапускаю бота..."
+        notice = "♻️ <b>Связь с Telegram зависла, перезапускаю бота…</b>"
     try:
         await bot.send_message(ctx.settings.ADMIN_USER_ID, notice)
     except TelegramAPIError as exc:
@@ -157,7 +160,10 @@ async def on_error(event: ErrorEvent, bot: Bot, ctx: AppContext) -> bool:
     try:
         await bot.send_message(
             ctx.settings.ADMIN_USER_ID,
-            f"⚠️ Ошибка: <code>{esc_fit(f'{type(event.exception).__name__}: {event.exception}', 800)}</code>",
+            theme.lines(
+                f"{theme.DOT_ERROR} <b>Ошибка в обработчике</b>",
+                f"<code>{esc_fit(f'{type(event.exception).__name__}: {event.exception}', 800)}</code>",
+            ),
         )
     except TelegramAPIError as exc:
         log.debug("Error notice not delivered: %s", exc)
@@ -176,7 +182,7 @@ async def notify_restored(bot: Bot, ctx: AppContext, downtime: float) -> None:
     try:
         await bot.send_message(
             ctx.settings.ADMIN_USER_ID,
-            f"📶 Связь с Telegram восстановлена (не было {human_duration(downtime)})",
+            theme.lines("📶 <b>Связь с Telegram восстановлена</b>", theme.meta(f"не было {human_duration(downtime)}")),
         )
     except TelegramAPIError as exc:
         log.debug("Reconnect notice not delivered: %s", exc)

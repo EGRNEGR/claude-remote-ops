@@ -14,15 +14,16 @@ from aiogram.types import CallbackQuery, Message
 
 from src.context import AppContext
 from src.handlers.runner import launch_run
-from src.keyboards.inline import BTN_USAGE, UsageCb, usage_kb
+from src.keyboards.inline import USAGE_TEXTS, UsageCb, usage_kb
 from src.services.claude_runner import RunRequest
 from src.services.file_manager import PathAccessError
 from src.services.quota import QuotaResult
 from src.services.reasoning import model_arg
 from src.services.state import RunMode
-from src.services.usage_report import render_dashboard, render_days, render_top, status_line
-from src.services.usage_tracker import SessionView
-from src.utils.text import esc, esc_fit, human_duration
+from src.services.usage_report import render_dashboard, render_days, render_top
+from src.services.usage_tracker import SessionView, UsageSummary
+from src.ui import theme
+from src.utils.text import human_duration
 
 log = logging.getLogger(__name__)
 router = Router(name="usage")
@@ -55,18 +56,18 @@ async def build_dashboard(ctx: AppContext, force_quota: bool = False) -> tuple[s
     return text, view is not None
 
 
-async def usage_status_line(ctx: AppContext) -> str:
-    """`📊 Квоты: 5ч 5% · Нед 97% | 💵 Сегодня: $4.13 (7д: $276.12)` for /status (never raises)."""
+async def usage_snapshot(ctx: AppContext) -> tuple[QuotaResult | None, UsageSummary | None]:
+    """Quotas and the spend summary for /status (never raises: the screen must render anyway)."""
     try:
         quota, _ = await asyncio.gather(_quota(ctx), ctx.usage.refresh())
-        return status_line(quota, ctx.usage.summary())
+        return quota, ctx.usage.summary()
     except Exception as exc:  # noqa: BLE001 - /status must render even if the analytics fail
-        log.warning("Usage line failed: %s", exc)
-        return "📊 Квоты и расходы: недоступны"
+        log.warning("Usage snapshot failed: %s", exc)
+        return None, None
 
 
 @router.message(Command("usage", "cost", "stats"))
-@router.message(F.text == BTN_USAGE)
+@router.message(F.text.in_(USAGE_TEXTS))
 async def cmd_usage(message: Message, ctx: AppContext, state: FSMContext) -> None:
     await state.clear()
     text, has_session = await build_dashboard(ctx, force_quota=True)
@@ -95,20 +96,25 @@ async def cmd_pin(message: Message, ctx: AppContext, state: FSMContext, command:
         return
     arg = (command.args or "").strip().lower()
     if arg and arg not in PIN_ON | PIN_OFF:
-        await message.answer("📌 <code>/pin</code> - вкл/выкл закреп с лимитами, <code>/pin on</code> | <code>/pin off</code>")
+        await message.answer("📌 <code>/pin</code> — вкл/выкл закреп с лимитами, <code>/pin on</code> | <code>/pin off</code>")
         return
     turn_on = arg in PIN_ON if arg else not pin.enabled
     if turn_on:
         await pin.enable()
         await message.answer(
-            "📌 <b>Закреп с лимитами включен</b>: строка вида <code>📊 35% 5ч. сброс 13:00, 83% нед.</code> "
-            f"обновляется сама раз в {human_duration(ctx.settings.USAGE_PIN_INTERVAL_SEC)}, после каждого "
-            "запуска Claude и сразу после сброса окна. Если закреп пропал - <code>/pin on</code>.",
+            theme.lines(
+                "📌 <b>Закреп с лимитами включен</b>",
+                theme.meta(
+                    f"Обновляется сам раз в {human_duration(ctx.settings.USAGE_PIN_INTERVAL_SEC)}",
+                    "после каждого запуска Claude и сброса окна",
+                    "пропал — /pin on",
+                ),
+            ),
             disable_notification=True,
         )
     else:
         await pin.disable()
-        await message.answer("📌 Закреп с лимитами выключен и удален. Включить снова: /pin")
+        await message.answer(theme.lines("📌 <b>Закреп с лимитами выключен</b>", theme.meta("Включить снова: /pin")))
 
 
 async def _edit(call: CallbackQuery, text: str, markup) -> None:  # type: ignore[no-untyped-def]
@@ -144,7 +150,7 @@ async def cb_compact(call: CallbackQuery, ctx: AppContext, bot: Bot) -> None:
     await ctx.usage.refresh()
     view, _ = current_session(ctx)
     if view is None or not view.cwd:
-        await call.answer("Нет чата для сжатия: выберите его в 📂 Сессии", show_alert=True)
+        await call.answer("Нет чата для сжатия: выберите его в 💬 Сессии", show_alert=True)
         return
     busy = {sid for run in ctx.runner.active_runs for sid in (run.session_id, run.request.session_id) if sid}
     if view.session_id in busy:
@@ -177,7 +183,7 @@ async def cb_new_chat(call: CallbackQuery, ctx: AppContext) -> None:
     view, _ = current_session(ctx)
     raw_cwd = (view.cwd if view else None) or ctx.state.active_cwd
     if not raw_cwd:
-        await call.answer("Сначала выберите рабочую папку в 📂 Сессии или 🗂 Файлы", show_alert=True)
+        await call.answer("Сначала выберите рабочую папку в 💬 Сессии или 📁 Файлы", show_alert=True)
         return
     try:
         cwd = ctx.safe.resolve_dir(raw_cwd)
@@ -187,9 +193,10 @@ async def cb_new_chat(call: CallbackQuery, ctx: AppContext) -> None:
     await ctx.store.update(run_mode=RunMode.NEW, active_cwd=str(cwd))
     await call.answer("🆕 Следующее сообщение начнет новый чат")
     if isinstance(call.message, Message):
-        old = f" Старый чат <code>{esc(view.session_id[:8])}</code> не тронут." if view else ""
-        await call.message.answer(
-            f"🆕 <b>Чистая сессия</b>: следующее сообщение начнет новый чат в "
-            f"<code>{esc_fit(str(cwd), 300)}</code> без старого контекста и его кэша.{old}\n"
-            "Вернуться к старому чату: 📂 Сессии → ▶️ Продолжить этот чат."
-        )
+        await call.message.answer(theme.lines(
+            theme.title("Чистый чат", marker="🆕"),
+            theme.meta(f"Рабочая папка: {theme.folder_label(cwd)}", "без старого контекста и его кэша"),
+            "",
+            theme.item("Следующее сообщение начнет новый чат, старый не тронут"),
+            theme.item("Вернуться к нему: 💬 Сессии → ▶️ Продолжить этот чат"),
+        ))

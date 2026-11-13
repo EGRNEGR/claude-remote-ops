@@ -9,16 +9,16 @@ import time
 from dataclasses import replace
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from src.context import AppContext
-from src.handlers.delivery import send_long_text, send_paths
+from src.handlers.delivery import send_card, send_html, send_paths
 from src.keyboards.inline import (
-    BTN_MODE,
     REPLY_BUTTONS,
+    SETTINGS_TEXTS,
     MenuCb,
     ModeCb,
     RunCb,
@@ -29,7 +29,7 @@ from src.keyboards.inline import (
 )
 from src.services.claude_runner import RunnerBusyError, RunRequest, RunState, RunStatus
 from src.services.file_manager import PathAccessError
-from src.services.reasoning import describe_choice, describe_cli, model_arg
+from src.services.reasoning import ReasoningEffort, describe_cli, effort_label, model_arg
 from src.services.state import (
     BG_POLICY_TITLES,
     RUN_MODE_TITLES,
@@ -40,28 +40,41 @@ from src.services.state import (
     RunMode,
     limit_profile_title,
 )
-from src.utils.text import esc, esc_fit, fmt_cost, human_duration, one_line, truncate
+from src.ui import theme
+from src.ui.formatter import fit_html
+from src.utils.text import esc, esc_fit, human_duration, one_line, truncate
 from src.utils.winpath import normcase
 
 log = logging.getLogger(__name__)
 router = Router(name="runner")
 
 HEARTBEAT_SEC = 10.0
+PROMPT_PREVIEW = 300
+HISTORY_SHOWN = 5
 
-_STATUS_TITLES = {
-    RunStatus.STARTING: "⏳ <b>Запуск Claude</b>",
-    RunStatus.RUNNING: "⚙️ <b>Claude работает</b>",
-    RunStatus.FINISHED: "✅ <b>Готово</b>",
-    RunStatus.FAILED: "❌ <b>Ошибка</b>",
-    RunStatus.KILLED: "🛑 <b>Остановлено</b>",
-    RunStatus.TIMEOUT: "⏰ <b>Превышен лимит времени</b>",
+_LIVE_TITLES = {
+    RunStatus.STARTING: (theme.DOT_IDLE, "Запуск Claude"),
+    RunStatus.RUNNING: (theme.DOT_BUSY, "Claude работает"),
+}
+# Final card: marker and the status word for the meta line (none for a normal finish).
+_FINAL_STATUS = {
+    RunStatus.FINISHED: (theme.MARK_TITLE, None),
+    RunStatus.FAILED: (theme.DOT_ERROR, "Ошибка"),
+    RunStatus.KILLED: (theme.DOT_IDLE, "Остановлено"),
+    RunStatus.TIMEOUT: (theme.DOT_BUSY, "Превышен лимит времени"),
+    RunStatus.STARTING: (theme.DOT_IDLE, "Не запустился"),
+    RunStatus.RUNNING: (theme.DOT_BUSY, "Прервано"),
 }
 _SUBTYPE_HINTS = {
     "error_max_turns": "Достигнут лимит ходов (--max-turns). Нажмите 🔓 «Повторить без ограничений».",
     "error_max_budget_usd": "Достигнут лимит бюджета (--max-budget-usd). Нажмите 🔓 «Повторить без ограничений».",
     "error_during_execution": "Ошибка во время выполнения.",
 }
-BUSY_TITLE = "🌿 <b>Чат занят фоновой сессией на ПК</b>"
+MODE_NAMES = {
+    RunMode.NEW: "новый чат",
+    RunMode.CONTINUE: "последний чат папки",
+    RunMode.RESUME: "выбранный чат",
+}
 RETRY_PROMPT = (
     "Предыдущий запуск был остановлен ограничениями бота ({reason}). Теперь разрешены все инструменты "
     "(Bash, Skills, MCP) и лимиты сняты. Продолжи с того места, где остановился, и доведи исходную "
@@ -71,80 +84,102 @@ RETRY_PROMPT = (
 
 # ---------- rendering ----------
 
-def _mode_line(state: RunState) -> str:
-    req = state.request
-    line = f"🧭 {esc(RUN_MODE_TITLES[req.mode])}"
-    sid = state.session_id or req.session_id
-    if sid:
-        line += f" · <code>{esc(sid[:8])}</code>"
+def _model_part(model: str | None, effort: ReasoningEffort) -> list[str]:
+    parts = [theme.model_name(model)]
+    if effort != ReasoningEffort.DEFAULT:
+        parts.append(f"ризонинг {effort_label(effort)}")
+    return [p for p in parts if p]
+
+
+def _request_line(req: RunRequest) -> str:
+    prompt = truncate(one_line(req.label or req.prompt), PROMPT_PREVIEW)
+    return f"<b>Запрос:</b> <i>{esc(prompt)}</i>"
+
+
+def _run_flags(req: RunRequest) -> list[str]:
+    """Only what differs from the defaults: copy of a chat, restricted tools, limits."""
+    flags = []
     if req.fork_session:
-        line += " · 🌿 --fork-session"
-    line += " · 🔓 full access" if req.skip_permissions else " · 🔒 restricted"
+        flags.append("копия чата")
+    if not req.skip_permissions:
+        flags.append("🔒 ограниченный доступ")
     limits = RunLimits(req.max_turns, req.max_budget_usd)
-    line += " · ♾" if limits.unlimited else f" · 💵 {esc(limits.describe())}"
-    return line + "\n" + esc(describe_choice(req.model, req.reasoning, state.model))
+    if not limits.unlimited:
+        flags.append(f"лимит {limits.describe()}")
+    return flags
 
 
 def render_status(state: RunState) -> str:
-    lines = [
-        f"{_STATUS_TITLES[state.status]} · ⏱ {human_duration(state.elapsed)}",
-        f"📁 <code>{esc_fit(str(state.request.cwd), 300)}</code>",
-        _mode_line(state),
-        f"🙋 <i>{esc_fit(one_line(state.request.label or state.request.prompt), 200)}</i>",
-        "",
-        f"▶️ <b>Сейчас:</b> {esc_fit(state.activity, 300)}",
-    ]
+    """Live progress card, edited in place while the CLI works."""
+    req = state.request
+    marker, label = _LIVE_TITLES.get(state.status, (theme.DOT_BUSY, "Claude работает"))
+    head = theme.lines(
+        f"{marker} <b>{label}</b>{theme.SEP}{theme.duration(state.elapsed)}",
+        theme.meta(
+            f"Рабочая папка: {theme.folder_label(req.cwd)}",
+            *_model_part(state.model or req.model, req.reasoning),
+            *_run_flags(req),
+        ),
+    )
+    now = theme.item(f"<b>Сейчас:</b> {esc_fit(state.activity, 300)}")
     history = list(state.history)[:-1] if state.history and state.history[-1] == state.activity else list(state.history)
+    earlier = ""
     if history:
-        lines.append("")
-        lines.append("🕘 <b>Последние действия:</b>")
-        lines.extend(f"• {esc_fit(item, 200)}" for item in history[-5:])
-    lines.append("")
-    stats = [f"👣 Шагов: {state.assistant_messages}", f"🔧 Инструментов: {state.tool_calls}"]
-    if state.touched_files:
-        stats.append(f"📝 Файлов: {len(state.touched_files)}")
+        rows = "\n".join(f"{theme.BULLET} {esc_fit(entry, 160)}" for entry in history[-HISTORY_SHOWN:])
+        earlier = theme.quote(rows, expandable=len(history) > 2)
+    stats = [f"шагов {state.assistant_messages}", f"инструментов {state.tool_calls}"]
     if state.tool_errors:
-        stats.append(f"❗ Ошибок: {state.tool_errors}")
-    lines.append(" · ".join(stats))
-    return "\n".join(lines)
+        stats.append(f"ошибок {state.tool_errors}")
+    return fit_html(theme.join_blocks(head, _request_line(req), theme.lines(now, earlier), theme.meta(*stats)))
 
 
-def render_final(state: RunState) -> str:
+def render_final_head(state: RunState, title: str) -> str:
+    req = state.request
+    marker, status_word = _FINAL_STATUS[state.status]
+    return theme.join_blocks(
+        theme.lines(
+            theme.title(title, marker=marker),
+            theme.meta(status_word, f"Рабочая папка: {theme.folder_label(req.cwd)}", theme.clock(time.time())),
+        ),
+        _request_line(req),
+    )
+
+
+def render_final_tail(state: RunState, branch_note: bool = False) -> str:
+    """Hints after the answer (limits, denied tools, compaction, errors) and the footer."""
     result = state.result
-    title = BUSY_TITLE if state.background_conflict is not None else _STATUS_TITLES[state.status]
-    lines = [
-        f"{title} · ⏱ {human_duration(state.elapsed)}",
-        f"📁 <code>{esc_fit(str(state.request.cwd), 300)}</code>",
-        _mode_line(state),
-    ]
-    stats = []
-    if result is not None:
-        stats.append(f"💵 {fmt_cost(result.cost_usd)}")
-        if result.num_turns is not None:
-            stats.append(f"🔁 Ходов: {result.num_turns}")
-    stats.append(f"🔧 Инструментов: {state.tool_calls}")
-    if state.touched_files:
-        stats.append(f"📝 Файлов: {len(state.touched_files)}")
-    if state.tool_errors:
-        stats.append(f"❗ Ошибок инструментов: {state.tool_errors}")
-    lines.append(" · ".join(stats))
-    if state.session_id:
-        lines.append(f"🆔 <code>{esc(state.session_id)}</code>")
+    req = state.request
+    hints: list[str] = []
+    if branch_note:
+        hints.append(theme.item("🌿 Это новая ветка чата: исходный чат на ПК не тронут"))
     if state.compacted is not None:
         pre, post = state.compacted
-        lines.append(f"🧹 Контекст сжат: {pre:,} → {post:,} токенов".replace(",", " "))
+        hints.append(theme.item(f"🧹 Контекст сжат: {pre:,} → {post:,} токенов".replace(",", " ")))
     if result is not None and result.subtype in _SUBTYPE_HINTS:
-        lines.append(f"ℹ️ {_SUBTYPE_HINTS[result.subtype]}")
+        hints.append(theme.item(esc(_SUBTYPE_HINTS[result.subtype])))
     if result is not None and result.permission_denials:
-        lines.append(
+        hints.append(theme.item(
             f"⚠️ Отклонено разрешений: {len(result.permission_denials)} "
             f"({esc_fit(', '.join(result.denied_tools), 300)}). "
-            "Нажмите 🔓 «Повторить без ограничений» или включите 🔓 Skip Permissions в /mode."
-        )
+            "Нажмите 🔓 «Повторить без ограничений» или включите 🔓 Полный доступ в ⚙️ Настройки."
+        ))
     if state.error and state.status != RunStatus.FINISHED:
-        lines.append("")
-        lines.append(f"<pre>{esc_fit(state.error, 1500)}</pre>")
-    return "\n".join(lines)
+        hints.append(theme.quote(f"<pre>{esc_fit(state.error, 1500)}</pre>", expandable=True))
+    if not (result is not None and result.text.strip()) and state.last_text and state.status != RunStatus.FINISHED:
+        hints.insert(0, theme.item("<i>Последнее сообщение Claude до остановки — выше</i>"))
+    footer = theme.meta(
+        *_model_part(state.model or req.model, req.reasoning),
+        theme.duration(state.elapsed),
+        theme.money(result.cost_usd) if result is not None else None,
+        *_run_flags(req),
+    )
+    return theme.join_blocks(theme.lines(*hints), footer)
+
+
+def render_compact_final(state: RunState) -> str:
+    """Used only when the progress message cannot be deleted: one quiet line pointing at the card."""
+    marker, status_word = _FINAL_STATUS[state.status]
+    return f"{marker} <b>{esc(status_word or 'Готово')}</b>{theme.SEP}{theme.duration(state.elapsed)} · ответ ниже"
 
 
 # ---------- live status message ----------
@@ -213,8 +248,20 @@ class StatusUpdater:
                 log.warning("Status edit network error: %s", exc)
                 await asyncio.sleep(2)
 
+    async def retire(self, fallback_text: str) -> None:
+        """The final card is sent as a new message (with a notification): remove the progress card."""
+        try:
+            await self._bot.delete_message(self._chat_id, self._message_id)
+        except TelegramAPIError as exc:
+            log.info("Progress message not deleted (%s), collapsing it", exc)
+            await self.edit(fallback_text, None)
+
 
 # ---------- launching ----------
+
+def _hint(title: str, *rows: str) -> str:
+    return theme.lines(f"{theme.DOT_ERROR} <b>{esc(title)}</b>", *(f"<i>{row}</i>" for row in rows))
+
 
 def build_request(
     ctx: AppContext,
@@ -232,22 +279,22 @@ def build_request(
             mode, session_id = RunMode.NEW, None
     elif mode == RunMode.RESUME:
         if not st.active_session_id:
-            return (
-                "💬 Не выбран чат для <code>--resume</code>.\n"
-                "Откройте 📂 Сессии и нажмите ▶️ «Продолжить этот чат» или смените режим в ⚙️ Режим."
+            return _hint(
+                "Не выбран чат для продолжения",
+                "Откройте 💬 Сессии → чат → ▶️ Продолжить или смените режим в ⚙️ Настройки",
             )
         raw_cwd = st.active_session_cwd or st.active_cwd or ""
     else:
         raw_cwd = st.active_cwd or ""
     if not raw_cwd:
-        return (
-            "📁 Не выбрана рабочая папка.\n"
-            "Выберите проект в 📂 Сессии (🎯 Сделать рабочей папкой) или папку в 🗂 Файлы (📌)."
+        return _hint(
+            "Не выбрана рабочая папка",
+            "Выберите проект в 💬 Сессии или папку в 📁 Файлы и нажмите 🎯 Рабочая папка",
         )
     try:
         cwd = ctx.safe.resolve_dir(raw_cwd)
     except PathAccessError as exc:
-        return f"🔒 {esc(exc)}\nДобавьте папку в ALLOWED_DIRS (.env) и перезапустите бота."
+        return _hint("Папка недоступна", esc(exc), "Добавьте ее в ALLOWED_DIRS (.env) и перезапустите бота")
     limits = ctx.run_limits()
     return RunRequest(
         prompt=prompt,
@@ -307,15 +354,19 @@ def build_resume_after_stop(state: RunState) -> RunRequest:
 def _busy_text(state: RunState) -> str:
     conflict = state.background_conflict
     assert conflict is not None
-    sid = state.request.session_id or ""
     bg = esc(conflict.bg_id)
-    return (
-        f"⚠️ Чат <code>{esc(sid[:8])}</code> сейчас открыт в фоновой сессии Claude на ПК (<code>{bg}</code>), "
-        "поэтому <code>--resume</code> отказался его продолжать.\n\n"
-        "🌿 <b>Ответвить копию</b>: тот же запрос в новой ветке с полным контекстом чата "
-        "(<code>--fork-session</code>), сессия на ПК продолжит работать.\n"
-        f"🛑 <b>Остановить фоновую и продолжить здесь</b>: <code>claude stop {bg}</code> "
-        "(переписка сохранится), затем запрос в исходном чате."
+    return theme.join_blocks(
+        theme.lines(
+            theme.title("Чат занят на ПК", marker="🌿"),
+            theme.meta(f"Рабочая папка: {theme.folder_label(state.request.cwd)}", f"фоновая сессия {conflict.bg_id}"),
+        ),
+        "Этот чат сейчас открыт в фоновой сессии Claude на ПК, поэтому <code>--resume</code> отказался его продолжать.",
+        theme.lines(
+            theme.item("<b>Ответвить копию</b> — тот же запрос в новой ветке с полным контекстом чата, "
+                       "сессия на ПК продолжит работать."),
+            theme.item(f"<b>Остановить на ПК</b> — <code>claude stop {bg}</code> (переписка сохранится), "
+                       "затем запрос в исходном чате."),
+        ),
     )
 
 
@@ -328,13 +379,11 @@ async def _handle_background_conflict(bot: Bot, chat_id: int, ctx: AppContext, s
         await bot.send_message(
             chat_id,
             f"🌿 Чат занят фоновой сессией на ПК (<code>{esc(conflict.bg_id)}</code>): "
-            "запускаю тот же запрос в копии чата (<code>--fork-session</code>)...",
+            "запускаю тот же запрос в копии чата…",
         )
         await launch_run(bot, chat_id, ctx, build_fork_retry(state))
         return
-    await bot.send_message(
-        chat_id, _busy_text(state), reply_markup=background_conflict_kb(state.run_id, conflict.bg_id)
-    )
+    await send_html(bot, chat_id, _busy_text(state), reply_markup=background_conflict_kb(state.run_id))
 
 
 async def launch_run(bot: Bot, chat_id: int, ctx: AppContext, request: RunRequest) -> None:
@@ -343,10 +392,37 @@ async def launch_run(bot: Bot, chat_id: int, ctx: AppContext, request: RunReques
     except RunnerBusyError as exc:
         active = ctx.runner.active_runs
         markup = run_status_kb(active[0].run_id) if active else None
-        await bot.send_message(chat_id, f"⏳ {esc(exc)}", reply_markup=markup)
+        await bot.send_message(chat_id, f"{theme.DOT_BUSY} <b>Claude занят</b>\n<i>{esc(exc)}</i>", reply_markup=markup)
         return
-    status = await bot.send_message(chat_id, "⏳ <b>Запуск Claude CLI...</b>")
+    status = await bot.send_message(chat_id, f"{theme.DOT_IDLE} <b>Запуск Claude</b>\n{theme.meta(theme.folder_label(request.cwd))}")
     ctx.spawn(_run_and_report(bot, chat_id, ctx, request, status.message_id), name="claude-run")
+
+
+def _card_title(ctx: AppContext, request: RunRequest, session_id: str | None) -> str:
+    st = ctx.state
+    if session_id and st.active_session_id == session_id and st.active_session_title and request.mode == RunMode.RESUME:
+        return st.active_session_title
+    return theme.folder_label(request.cwd)
+
+
+async def _remember_session(ctx: AppContext, request: RunRequest, session_id: str) -> None:
+    st = ctx.state
+    if st.active_session_id == session_id:
+        title = st.active_session_title
+    elif request.fork_session and st.active_session_id == request.session_id and st.active_session_title:
+        title = "🌿 " + st.active_session_title.removeprefix("🌿 ")
+    else:
+        title = truncate(one_line(request.prompt), 60)
+    await ctx.store.update(
+        active_session_id=session_id,
+        active_session_cwd=str(request.cwd),
+        active_cwd=str(request.cwd),
+        active_session_title=title,
+        run_mode=RunMode.RESUME,
+    )
+    meta = await ctx.inspector.find_session(session_id)
+    if meta is not None and ctx.watcher is not None:
+        ctx.watcher.mark_consumed(meta.path)
 
 
 async def _run_and_report(bot: Bot, chat_id: int, ctx: AppContext, request: RunRequest, message_id: int) -> None:
@@ -358,101 +434,85 @@ async def _run_and_report(bot: Bot, chat_id: int, ctx: AppContext, request: RunR
             on_started=updater.start,
         )
     except RunnerBusyError as exc:
-        await updater.edit(f"⏳ {esc(exc)}", None)
+        await updater.edit(f"{theme.DOT_BUSY} <b>Claude занят</b>\n<i>{esc(exc)}</i>", None)
         return
     finally:
         await updater.stop()
-    result = state.result
-    session_id = (result.session_id if result else None) or state.session_id
-    await updater.edit(render_final(state), None)
     if ctx.quota_pin is not None:
         ctx.quota_pin.poke()
     if state.background_conflict is not None:
+        await updater.retire(render_compact_final(state))
         await _handle_background_conflict(bot, chat_id, ctx, state)
         return
 
+    result = state.result
+    session_id = (result.session_id if result else None) or state.session_id
     if session_id and state.status in (RunStatus.FINISHED, RunStatus.FAILED, RunStatus.KILLED):
-        st = ctx.state
-        if st.active_session_id == session_id:
-            title = st.active_session_title
-        elif request.fork_session and st.active_session_id == request.session_id and st.active_session_title:
-            title = "🌿 " + st.active_session_title.removeprefix("🌿 ")
-        else:
-            title = truncate(one_line(request.prompt), 60)
-        await ctx.store.update(
-            active_session_id=session_id,
-            active_session_cwd=str(request.cwd),
-            active_cwd=str(request.cwd),
-            active_session_title=title,
-            run_mode=RunMode.RESUME,
-        )
-        meta = await ctx.inspector.find_session(session_id)
-        if meta is not None and ctx.watcher is not None:
-            ctx.watcher.mark_consumed(meta.path)
-
+        await _remember_session(ctx, request, session_id)
+    branch = bool(request.fork_session and request.session_id and session_id and request.session_id != session_id)
     markup = run_done_kb(
         state.run_id, len(state.touched_files), session_id,
         offer_unrestricted_retry=state.blocked_by_restrictions,
     )
     if result is not None and result.text.strip():
-        await send_long_text(bot, chat_id, result.text, ctx.settings.MAX_INLINE_CHUNKS, markup)
+        answer = result.text
     elif state.last_text and state.status != RunStatus.FINISHED:
-        await send_long_text(
-            bot, chat_id, "Последнее сообщение Claude до остановки:\n\n" + state.last_text,
-            ctx.settings.MAX_INLINE_CHUNKS, markup,
-        )
-    elif markup is not None:
-        await bot.send_message(chat_id, "📎 Действия по завершенному запуску:", reply_markup=markup)
-    if session_id and state.status in (RunStatus.FINISHED, RunStatus.FAILED, RunStatus.KILLED):
-        branch = ""
-        if request.fork_session and request.session_id and request.session_id != session_id:
-            branch = (
-                f"🌿 Это новая ветка <code>{esc(session_id[:8])}</code>, исходный чат "
-                f"<code>{esc(request.session_id[:8])}</code> на ПК не тронут.\n"
-            )
-        await bot.send_message(
-            chat_id,
-            branch + "↪️ Следующее сообщение продолжит этот чат. /new - начать новый чат в этой папке.",
-        )
+        answer = state.last_text
+    else:
+        answer = ""
+    await send_card(
+        bot, chat_id,
+        render_final_head(state, _card_title(ctx, request, session_id)),
+        answer,
+        render_final_tail(state, branch_note=branch),
+        markup,
+        ctx.settings.MAX_INLINE_CHUNKS,
+        filename=f"claude_{state.run_id}.md",
+    )
+    await updater.retire(render_compact_final(state))
 
 
-# ---------- mode panel ----------
+# ---------- settings panel ----------
 
 def render_mode(ctx: AppContext) -> str:
     st = ctx.state
     s = ctx.settings
     cwd = ctx.active_cwd()
-    lines = ["⚙️ <b>Режим запуска Claude</b>", ""]
-    lines.append(f"📁 Рабочая папка: <code>{esc_fit(str(cwd), 300)}</code>" if cwd else "📁 Рабочая папка: <i>не выбрана</i>")
-    if st.active_session_id:
-        title = f" «{esc_fit(st.active_session_title, 80)}»" if st.active_session_title else ""
-        lines.append(f"💬 Выбранный чат: <code>{esc(st.active_session_id[:8])}</code>{title}")
-    lines.append(f"🧭 Режим: <b>{esc(RUN_MODE_TITLES[st.run_mode])}</b>")
-    if st.skip_permissions:
-        lines.append("🔓 Доступ: <b>Skip Permissions (Full MCP &amp; Bash)</b>")
-    else:
-        lines.append("🔒 Доступ: <b>Restricted Tools</b> (только CLAUDE_ALLOWED_TOOLS)")
-    lines.append(f"📏 Лимиты: <b>{esc(limit_profile_title(st.limit_profile, ctx.env_limits()))}</b>")
-    lines.append(f"<b>{esc(describe_choice(st.claude_model, st.reasoning_effort))}</b>")
-    lines.append(f"🖥 Если чат занят фоновой сессией на ПК: <b>{esc(BG_POLICY_TITLES[st.bg_session_policy])}</b>")
     watcher_on = ctx.watcher is not None and ctx.watcher.running
-    lines.append(f"👁 Авто-отчеты: {'ВКЛ' if watcher_on else 'ВЫКЛ'} (пауза {s.WATCH_DEBOUNCE_SEC:g} с)")
-    lines.append("")
+    facts = [theme.field("Проект", esc(theme.folder_label(cwd)) if cwd else "не выбран")]
+    if st.run_mode == RunMode.RESUME and st.active_session_title:
+        facts.append(theme.field("Чат", esc_fit(st.active_session_title, 80)))
+    facts += [
+        theme.field("Режим", esc(MODE_NAMES[st.run_mode])),
+        theme.field("Доступ", "полный" if st.skip_permissions else "только разрешенные инструменты"),
+        theme.field("Лимиты", esc(limit_profile_title(st.limit_profile, ctx.env_limits()))),
+        theme.field("Модель", esc(theme.SEP.join(_model_part(model_arg(st.claude_model) or "default", st.reasoning_effort)))),
+        theme.field("Если чат занят на ПК", esc(BG_POLICY_TITLES[st.bg_session_policy].split(": ", 1)[-1])),
+        theme.field("Авто-отчеты", f"{'вкл' if watcher_on else 'выкл'}, пауза {s.WATCH_DEBOUNCE_SEC:g} с"),
+    ]
     limits = ctx.run_limits()
     turns = f"--max-turns {limits.max_turns}" if limits.max_turns else "без --max-turns"
     budget = f"--max-budget-usd {limits.max_budget_usd:g}" if limits.max_budget_usd else "без --max-budget-usd"
-    lines.append(f"🛠 {turns} · {budget} · таймаут {human_duration(s.CLAUDE_TIMEOUT_SEC)}")
-    if st.skip_permissions:
-        lines.append("🔧 Флаг: <code>--dangerously-skip-permissions</code> (--allowedTools не передается)")
-    else:
-        lines.append(f"🔧 allowedTools: <code>{esc_fit(s.CLAUDE_ALLOWED_TOOLS, 400)}</code>")
-    lines.append(f"💭 <code>{esc(describe_cli(st.claude_model, st.reasoning_effort))}</code>")
-    return "\n".join(lines)
+    access = (
+        "--dangerously-skip-permissions (без --allowedTools)" if st.skip_permissions
+        else f"--allowedTools {s.CLAUDE_ALLOWED_TOOLS}"
+    )
+    details = theme.lines(
+        "<b>Флаги следующего запуска</b>",
+        f"{theme.BULLET} {esc(turns)} · {esc(budget)} · таймаут {human_duration(s.CLAUDE_TIMEOUT_SEC)}",
+        f"{theme.BULLET} <code>{esc_fit(access, 400)}</code>",
+        f"{theme.BULLET} <code>{esc(describe_cli(st.claude_model, st.reasoning_effort))}</code>",
+    )
+    return theme.join_blocks(
+        theme.lines(theme.title("Настройки"), theme.meta("Применяются к следующему запуску Claude")),
+        theme.lines(*facts),
+        theme.quote(details),
+    )
 
 
 async def set_watcher(ctx: AppContext, enabled: bool) -> str:
     if ctx.watcher is None:
-        return "Watcher не инициализирован"
+        return "Авто-отчеты недоступны"
     try:
         if enabled:
             await ctx.watcher.start()
@@ -464,19 +524,22 @@ async def set_watcher(ctx: AppContext, enabled: bool) -> str:
     return "👁 Авто-отчеты включены" if enabled else "🙈 Авто-отчеты выключены"
 
 
-@router.message(Command("mode"))
-@router.message(F.text == BTN_MODE)
+def _mode_markup(ctx: AppContext) -> InlineKeyboardMarkup:
+    return mode_kb(ctx.state, ctx.watcher is not None and ctx.watcher.running)
+
+
+@router.message(Command("mode", "settings"))
+@router.message(F.text.in_(SETTINGS_TEXTS))
 async def cmd_mode(message: Message, ctx: AppContext, state: FSMContext) -> None:
     await state.clear()
-    watcher_on = ctx.watcher is not None and ctx.watcher.running
-    await message.answer(render_mode(ctx), reply_markup=mode_kb(ctx.state, watcher_on, ctx.env_limits()))
+    await message.answer(render_mode(ctx), reply_markup=_mode_markup(ctx))
 
 
 @router.callback_query(MenuCb.filter(F.action == "mode"))
 async def cb_menu_mode(call: CallbackQuery, ctx: AppContext) -> None:
-    watcher_on = ctx.watcher is not None and ctx.watcher.running
     if isinstance(call.message, Message):
-        await call.message.answer(render_mode(ctx), reply_markup=mode_kb(ctx.state, watcher_on, ctx.env_limits()))
+        with contextlib.suppress(TelegramBadRequest):
+            await call.message.edit_text(render_mode(ctx), reply_markup=_mode_markup(ctx))
     await call.answer()
 
 
@@ -487,7 +550,7 @@ async def cb_mode(call: CallbackQuery, callback_data: ModeCb, ctx: AppContext) -
     if action in (RunMode.NEW.value, RunMode.CONTINUE.value, RunMode.RESUME.value):
         mode = RunMode(action)
         if mode == RunMode.RESUME and not ctx.state.active_session_id:
-            await call.answer("Сначала выберите чат в 📂 Сессии (▶️ Продолжить этот чат)", show_alert=True)
+            await call.answer("Сначала выберите чат в 💬 Сессии (▶️ Продолжить этот чат)", show_alert=True)
             return
         await ctx.store.update(run_mode=mode)
         note = RUN_MODE_TITLES[mode]
@@ -517,10 +580,9 @@ async def cb_mode(call: CallbackQuery, callback_data: ModeCb, ctx: AppContext) -
     elif action == "watch":
         running = ctx.watcher is not None and ctx.watcher.running
         note = await set_watcher(ctx, not running)
-    watcher_on = ctx.watcher is not None and ctx.watcher.running
     if isinstance(call.message, Message):
         with contextlib.suppress(TelegramBadRequest):
-            await call.message.edit_text(render_mode(ctx), reply_markup=mode_kb(ctx.state, watcher_on, ctx.env_limits()))
+            await call.message.edit_text(render_mode(ctx), reply_markup=_mode_markup(ctx))
     await call.answer(note)
 
 
@@ -543,8 +605,12 @@ async def cmd_new(message: Message, command: CommandObject, bot: Bot, ctx: AppCo
         await launch_run(bot, message.chat.id, ctx, request)
         return
     cwd = ctx.active_cwd()
-    where = f" в <code>{esc_fit(str(cwd), 300)}</code>" if cwd else " (сначала выберите папку)"
-    await message.answer(f"{esc(RUN_MODE_TITLES[mode])}: следующее сообщение запустит Claude{where}.")
+    where = f"Рабочая папка: {theme.folder_label(cwd)}" if cwd else "сначала выберите рабочую папку"
+    title = "Новый чат" if mode == RunMode.NEW else "Последний чат папки"
+    await message.answer(theme.lines(
+        theme.title(title, marker="🆕" if mode == RunMode.NEW else "⏩"),
+        theme.meta("Следующее сообщение запустит Claude", where),
+    ))
 
 
 # ---------- kill switch / results ----------
@@ -567,7 +633,7 @@ async def cb_retry_unrestricted(call: CallbackQuery, callback_data: RunCb, bot: 
     except PathAccessError as exc:
         await call.answer(f"🔒 {truncate(str(exc), 180)}", show_alert=True)
         return
-    await call.answer("🔓 Перезапуск без ограничений...")
+    await call.answer("🔓 Перезапуск без ограничений…")
     if isinstance(call.message, Message):
         with contextlib.suppress(TelegramBadRequest):
             await call.message.edit_reply_markup(
@@ -614,17 +680,23 @@ async def cb_background_conflict(call: CallbackQuery, callback_data: RunCb, bot:
         conflict.handled = False
         await bot.send_message(
             call.from_user.id,
-            f"❌ Не удалось остановить фоновую сессию <code>{bg}</code>:\n"
-            f"<pre>{esc_fit(output or 'claude stop ничего не вывел', 1500)}</pre>\n"
-            "Можно 🌿 ответвить копию: она не трогает сессию на ПК.",
-            reply_markup=background_conflict_kb(state.run_id, conflict.bg_id, allow_stop=False),
+            theme.join_blocks(
+                theme.lines(
+                    f"{theme.DOT_ERROR} <b>Не удалось остановить фоновую сессию <code>{bg}</code></b>",
+                    theme.meta("Можно ответвить копию: она не трогает сессию на ПК"),
+                ),
+                theme.quote(f"<pre>{esc_fit(output or 'claude stop ничего не вывел', 1500)}</pre>"),
+            ),
+            reply_markup=background_conflict_kb(state.run_id, allow_stop=False),
         )
         return
     await _drop_keyboard(call)
     await bot.send_message(
         call.from_user.id,
-        f"🛑 Фоновая сессия <code>{bg}</code> остановлена, переписка сохранена "
-        f"(<code>{esc_fit(one_line(output), 200)}</code>). Продолжаю в исходном чате...",
+        theme.lines(
+            f"🛑 Фоновая сессия <code>{bg}</code> остановлена, переписка сохранена",
+            theme.meta(one_line(output), "продолжаю в исходном чате"),
+        ),
     )
     await launch_run(bot, call.from_user.id, ctx, replace(build_resume_after_stop(state), cwd=cwd))
 

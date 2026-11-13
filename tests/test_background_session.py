@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from aiogram.methods import AnswerCallbackQuery, EditMessageReplyMarkup, EditMessageText, SendMessage
+from aiogram.methods import AnswerCallbackQuery, DeleteMessage, EditMessageReplyMarkup, SendMessage
 from conftest import SESSION_ID
 from fake_claude import FORK_SID
+from tg_harness import run_cards
 
-from src.handlers.runner import BUSY_TITLE
 from src.keyboards.inline import ModeCb, RunCb, SessCb
 from src.services.claude_runner import ClaudeRunner, RunRequest, RunStatus, detect_background_conflict
 from src.services.state import BgSessionPolicy, RunMode
@@ -122,14 +122,14 @@ def test_bot_offers_fork_and_stop_buttons(harness_factory, busy_file: Path) -> N
 
     async def scenario() -> None:
         run_id, calls = await _busy_run(h)
-        assert any(isinstance(c, EditMessageText) and c.text.startswith(BUSY_TITLE) for c in calls)
+        assert any(isinstance(c, DeleteMessage) for c in calls)  # the progress card gives way to the offer
         offer = _sent(calls)[-1]
-        assert f"(<code>{BG_ID}</code>)" in offer.text and "--fork-session" in offer.text
+        assert offer.text.startswith("🌿 <b>Чат занят на ПК</b>")
+        assert f"фоновая сессия {BG_ID}" in offer.text and f"<code>claude stop {BG_ID}</code>" in offer.text
         buttons = [(b.text, b.callback_data) for row in offer.reply_markup.inline_keyboard for b in row]
         assert buttons == [
-            ("🌿 Ответвить копию (--fork-session)", RunCb(action="fork", run_id=run_id).pack()),
-            (f"🛑 Остановить фоновую (claude stop {BG_ID}) и продолжить здесь",
-             RunCb(action="bgstop", run_id=run_id).pack()),
+            ("🌿 Ответвить копию", RunCb(action="fork", run_id=run_id).pack()),
+            ("🛑 Остановить на ПК и продолжить", RunCb(action="bgstop", run_id=run_id).pack()),
         ]
         assert h.ctx.state.active_session_id == SESSION_ID  # nothing switched on a refused run
 
@@ -138,9 +138,10 @@ def test_bot_offers_fork_and_stop_buttons(harness_factory, busy_file: Path) -> N
         await h.drain()
         calls = h.session.take()
         assert _answer(calls) == "🌿 Ответвляю копию чата..." and any(isinstance(c, EditMessageReplyMarkup) for c in calls)
-        answer = next(c for c in _sent(calls) if c.parse_mode is None)
+        answer = run_cards(calls)[0]
         assert "echo: Проверь проект" in answer.text and f"--resume {SESSION_ID} --fork-session" in answer.text
-        assert any("🌿 Это новая ветка <code>99999999</code>" in c.text for c in _sent(calls))
+        assert "🌿 Это новая ветка чата: исходный чат на ПК не тронут" in answer.text
+        assert "копия чата" in answer.text and "99999999" not in answer.text
         st = h.ctx.state
         assert st.active_session_id == FORK_SID and st.run_mode == RunMode.RESUME
         assert (st.active_session_title or "").startswith("🌿 ")
@@ -166,7 +167,7 @@ def test_bot_stops_background_and_continues_in_original_chat(harness_factory, bu
         assert _answer(calls) == f"🛑 claude stop {BG_ID}..."
         texts = [c.text for c in _sent(calls)]
         assert any(f"Фоновая сессия <code>{BG_ID}</code> остановлена" in t and f"stopped {BG_ID}" in t for t in texts)
-        answer = next(c for c in _sent(calls) if c.parse_mode is None)
+        answer = run_cards(calls)[0]
         assert f"--resume {SESSION_ID}" in answer.text and "--fork-session" not in answer.text
         assert not busy_file.exists() and h.ctx.state.active_session_id == SESSION_ID
 
@@ -204,7 +205,7 @@ def test_fork_policy_forks_automatically(harness_factory, busy_file: Path) -> No
         texts = [c.text for c in _sent(calls)]
         assert any("запускаю тот же запрос в копии чата" in t for t in texts)
         assert not any(c.reply_markup for c in _sent(calls) if "🛑 Остановить" in str(c.reply_markup))
-        answer = next(c for c in _sent(calls) if c.parse_mode is None)
+        answer = run_cards(calls)[0]
         assert "--fork-session" in answer.text and h.ctx.state.active_session_id == FORK_SID
         assert len(h.ctx.runner._finished) == 2  # the refused run + exactly one fork
 
@@ -218,9 +219,9 @@ def test_mode_panel_switches_policy(harness_factory) -> None:
         await h.ctx.store.load()
         await h.text("/mode")
         panel = _sent(h.session.take())[0]
-        assert "Если чат занят фоновой сессией на ПК" in panel.text
+        assert "Если чат занят на ПК: <b>спросить" in panel.text
         buttons = {b.callback_data: b.text for row in panel.reply_markup.inline_keyboard for b in row}
-        assert buttons[ModeCb(action="bg_ask").pack()].startswith("✅ ❓")
+        assert buttons[ModeCb(action="bg_ask").pack()] == "✅ ❓ Спросить"
         assert not buttons[ModeCb(action="bg_fork").pack()].startswith("✅")
         await h.callback(ModeCb(action="bg_fork").pack())
         assert h.ctx.state.bg_session_policy is BgSessionPolicy.FORK

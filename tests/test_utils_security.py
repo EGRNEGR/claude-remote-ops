@@ -10,7 +10,7 @@ import pytest
 from src.keyboards.inline import FileCb, ModeCb, ProjCb, RunCb, SessCb, UpCb
 from src.services.file_manager import FileManager, PathAccessError, SafePathManager, decode_text
 from src.utils.registry import TokenRegistry
-from src.utils.text import chunk_text, esc, esc_fit, plural, truncate
+from src.utils.text import esc, esc_fit, plural, truncate
 from src.utils.winpath import IS_WINDOWS, is_within, long_path, sanitize_filename, unique_path
 
 
@@ -20,13 +20,6 @@ def test_esc_fit_never_cuts_entities() -> None:
         out = esc_fit(text, limit)
         assert len(out) <= limit
         assert not re.search(r"&(?!(amp|lt|gt);)", out)
-
-
-def test_chunk_text_respects_limit() -> None:
-    text = "\n".join(f"строка {i} " + "x" * 50 for i in range(500))
-    chunks = chunk_text(text, 4000)
-    assert all(len(c) <= 4000 for c in chunks)
-    assert "".join(chunks).replace("\n", "") == text.replace("\n", "")
 
 
 def test_misc_text() -> None:

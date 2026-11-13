@@ -64,28 +64,6 @@ def truncate_middle(text: str, limit: int) -> str:
     return f"{text[:head]}…{text[-tail:]}"
 
 
-def chunk_text(text: str, size: int = TG_SAFE_LIMIT) -> list[str]:
-    """Split text into chunks <= size, preferring paragraph and line boundaries."""
-    if size <= 0:
-        raise ValueError("size must be positive")
-    chunks: list[str] = []
-    rest = text
-    while len(rest) > size:
-        window = rest[:size]
-        cut = window.rfind("\n\n")
-        if cut < size // 2:
-            cut = window.rfind("\n")
-        if cut < size // 2:
-            cut = window.rfind(" ")
-        if cut < size // 2:
-            cut = size
-        chunks.append(rest[:cut].rstrip())
-        rest = rest[cut:].lstrip("\n")
-    if rest.strip():
-        chunks.append(rest)
-    return chunks or [""]
-
-
 def human_size(num: float) -> str:
     units = ("Б", "КБ", "МБ", "ГБ", "ТБ")
     value = float(num)

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
 from conftest import SESSION_ID
-from tg_harness import AUDIO_BYTES, STRANGER
+from tg_harness import AUDIO_BYTES, STRANGER, Card, run_cards
 
 from src.keyboards.inline import FileCb, VoiceCb
 from src.services.state import RunMode
@@ -43,9 +43,9 @@ class FakeTranscriber:
                           duration=4.0, elapsed=0.4, device="cpu int8")
 
 
-def _answers(calls: list) -> list[SendMessage]:
-    """Claude answers are sent as plain text (parse_mode=None)."""
-    return [c for c in calls if isinstance(c, SendMessage) and c.parse_mode is None]
+def _answers(calls: list) -> list[Card]:
+    """Final run cards with Claude's answer (visible text)."""
+    return run_cards(calls)
 
 
 async def _select_session(h, allowed: Path) -> None:
@@ -95,7 +95,7 @@ def test_voice_confirm_buttons(harness_factory, tmp_path: Path) -> None:
         calls = h.session.take()
         edit = next(c for c in calls if isinstance(c, EditMessageText) and "Распознанный запрос" in c.text)
         labels = [b.text for row in edit.reply_markup.inline_keyboard for b in row]
-        assert labels == ["▶️ Запустить", "❌ Отмена"] and not _answers(calls)
+        assert labels == ["▶️ Запустить", "✖️ Отмена"] and not _answers(calls)
 
         await h.callback(VoiceCb(action="run").pack(), message_id=edit.message_id)
         await h.drain()
@@ -147,7 +147,7 @@ def test_voice_becomes_answer_to_file_question(harness_factory, tmp_path: Path) 
         await h.voice()
         await h.drain()
         answer = _answers(h.session.take())[0]
-        assert "Работаем с файлом `src\\main.py`" in answer.text
+        assert "Работаем с файлом src\\main.py" in answer.text and "<code>src\\main.py</code>" in answer.html
         assert "объясни, что делает этот файл" in answer.text
 
     asyncio.run(scenario())

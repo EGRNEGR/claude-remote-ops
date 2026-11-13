@@ -254,7 +254,7 @@ def test_restart_command_hands_over(harness_factory, tmp_path: Path) -> None:
 
     asyncio.run(scenario())
     texts = [c.text for c in _calls(h, SendMessage)]
-    assert texts[0] == RESTARTING_TEXT and texts[1] == "⏳ Перезапуск уже выполняется..."
+    assert texts[0] == RESTARTING_TEXT and texts[1] == "⏳ Перезапуск уже выполняется…"
     assert stops == [True] and len(launches) == 1 and h.ctx.restarter.handed_over
     request = RestartRequest.from_dict(json.loads(state_file.read_text(encoding="utf-8")))
     assert (request.chat_id, request.message_id, request.update_id) == (42, 1000, 1)
@@ -336,7 +336,8 @@ def test_status_and_mode_menus_offer_restart(harness_factory) -> None:
     restart_cb = MenuCb(action="restart").pack()
     for call in _calls(h, SendMessage):
         buttons = [(b.text, b.callback_data) for row in call.reply_markup.inline_keyboard for b in row]
-        assert ("🔄 Перезапустить бота", restart_cb) in buttons
+        assert ("♻️ Перезапустить бота", restart_cb) in buttons
+        assert not any(text in ("💬 Сессии", "📁 Файлы", "📊 Лимиты", "⚙️ Настройки") for text, _ in buttons)
 
 
 # ---------- startup / shutdown in main.py ----------
@@ -376,7 +377,7 @@ def test_new_process_announces_restart(harness_factory, tmp_path: Path, edit_fai
     assert (get_updates.offset, get_updates.limit, get_updates.timeout) == (6, 1, 0)
     edit = _calls(h, EditMessageText)[0]
     assert (edit.chat_id, edit.message_id) == (42, 77)
-    assert edit.text.startswith(RESTARTED_TEXT) and "📊 <b>Состояние</b>" in edit.text
+    assert edit.text.startswith(RESTARTED_TEXT) and "✦ <b>Состояние</b>" in edit.text
     sent = [c.text for c in _calls(h, SendMessage)]
     assert not any("claude-remote-ops запущен" in t for t in sent)  # no second "started" message
     assert sent == ([edit.text] if edit_fails else [])
@@ -390,7 +391,7 @@ def test_old_process_shuts_down_silently_after_hand_over(harness_factory) -> Non
     assert _calls(h, SendMessage) == []
     h.ctx.restarter.handed_over = False
     asyncio.run(main.on_shutdown(h.bot, h.ctx))
-    assert [c.text for c in _calls(h, SendMessage)] == ["🔴 claude-remote-ops остановлен"]
+    assert [c.text for c in _calls(h, SendMessage)] == ["🔴 <b>claude-remote-ops остановлен</b>"]
 
 
 # ---------- main.run_bot end to end: real Dispatcher polling loop, scripted Bot API ----------

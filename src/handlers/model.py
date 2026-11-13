@@ -15,41 +15,50 @@ from src.context import AppContext
 from src.keyboards.inline import MenuCb, ModelCb, model_kb
 from src.services.reasoning import (
     EFFORT_TITLES,
+    MODEL_DEFAULT,
     MODEL_TITLES,
     ReasoningEffort,
-    describe_choice,
     describe_cli,
     effort_label,
+    model_arg,
     model_label,
     normalize_model,
     parse_effort,
 )
+from src.ui import theme
 from src.utils.text import esc
 
 log = logging.getLogger(__name__)
 router = Router(name="model")
 
-MODEL_HELP = (
-    "<i>⚡ Sonnet - баланс скорости и качества · 🧠 Opus - самые сложные задачи · "
-    "🪶 Haiku - быстро и дешево.\n"
-    "🚫 Выкл / 🟢 Low экономят лимиты, 🟠 High / 🔥 Max думают глубже (Max добавляет ultrathink).\n"
-    "⚙️ Авто = настройки Claude Code по умолчанию.</i>\n"
-    "Любая модель: <code>/model claude-sonnet-5-5</code> · уровень: "
-    "<code>/effort off|low|medium|high|xhigh|max|auto</code>"
-)
+MODEL_HELP = "\n".join([
+    "<b>Подсказка</b>",
+    "⚡ Sonnet — баланс скорости и качества · 🧠 Opus — самые сложные задачи · 🪶 Haiku — быстро и дешево",
+    "🚫 Выкл / 🟢 Low экономят лимиты, 🟠 High / 🔥 Max думают глубже (Max добавляет ultrathink)",
+    "⚙️ Авто — настройки Claude Code по умолчанию",
+    "Любая модель: <code>/model claude-sonnet-5-5</code>",
+    "Уровень: <code>/effort off|low|medium|high|xhigh|max|auto</code>",
+])
+
+
+def choice_rows(model: str, effort: ReasoningEffort) -> str:
+    return theme.lines(
+        theme.field("Модель", esc(theme.model_name(model_arg(model) or MODEL_DEFAULT) or model)),
+        theme.field("Ризонинг", esc(effort_label(effort))),
+    )
 
 
 def render_model_menu(ctx: AppContext) -> str:
     st = ctx.state
-    return "\n".join([
-        "🧠 <b>Модель и Ризонинг</b>",
-        "",
-        f"<b>{esc(describe_choice(st.claude_model, st.reasoning_effort))}</b>",
-        f"🔧 <code>{esc(describe_cli(st.claude_model, st.reasoning_effort))}</code>",
-        "Применяется к следующему запуску, в том числе к продолжению чата (--resume). Выбор сохраняется.",
-        "",
-        MODEL_HELP,
-    ])
+    return theme.join_blocks(
+        theme.lines(theme.title("Модель и ризонинг"), theme.meta("Для следующего запуска, в том числе --resume")),
+        choice_rows(st.claude_model, st.reasoning_effort),
+        theme.quote(theme.lines(MODEL_HELP, "", f"<code>{esc(describe_cli(st.claude_model, st.reasoning_effort))}</code>")),
+    )
+
+
+def render_choice(model: str, effort: ReasoningEffort) -> str:
+    return theme.lines(f"{theme.DOT_OK} <b>Выбор сохранен</b>", choice_rows(model, effort))
 
 
 async def _show_menu(message: Message, ctx: AppContext) -> None:
@@ -69,9 +78,7 @@ async def cmd_model(message: Message, command: CommandObject, ctx: AppContext, s
         return
     await ctx.store.update(claude_model=model)
     log.info("Model set to %s via /model", model)
-    await message.answer(
-        f"✅ {esc(describe_choice(model, ctx.state.reasoning_effort))}", reply_markup=model_kb(ctx.state)
-    )
+    await message.answer(render_choice(model, ctx.state.reasoning_effort), reply_markup=model_kb(ctx.state))
 
 
 @router.message(Command("effort"))
@@ -87,16 +94,15 @@ async def cmd_effort(message: Message, command: CommandObject, ctx: AppContext, 
         return
     await ctx.store.update(reasoning_effort=effort)
     log.info("Reasoning effort set to %s via /effort", effort)
-    await message.answer(
-        f"✅ {esc(describe_choice(ctx.state.claude_model, effort))}", reply_markup=model_kb(ctx.state)
-    )
+    await message.answer(render_choice(ctx.state.claude_model, effort), reply_markup=model_kb(ctx.state))
 
 
 @router.callback_query(MenuCb.filter(F.action == "model"))
 async def cb_menu_model(call: CallbackQuery, ctx: AppContext) -> None:
     await call.answer()
     if isinstance(call.message, Message):
-        await _show_menu(call.message, ctx)
+        with contextlib.suppress(TelegramBadRequest):
+            await call.message.edit_text(render_model_menu(ctx), reply_markup=model_kb(ctx.state))
 
 
 @router.callback_query(ModelCb.filter())

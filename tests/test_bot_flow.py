@@ -6,9 +6,9 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from aiogram.methods import EditMessageText, SendDocument, SendMessage
+from aiogram.methods import DeleteMessage, EditMessageText, SendDocument, SendMessage
 from conftest import SESSION_ID
-from tg_harness import STRANGER
+from tg_harness import STRANGER, run_cards
 
 from src.keyboards.inline import FileCb, ProjCb, RunCb, SessCb, UpCb
 from src.services.session_parser import encode_project_path
@@ -40,16 +40,22 @@ def test_full_bot_flow(harness_factory, tmp_path: Path) -> None:
 
         # 4. Projects -> sessions -> report.
         await h.text("/sessions")
-        assert any("Проекты Claude Code" in t and "allowed" in t for t in h.session.texts())
+        listing = next(c for c in h.session.calls if isinstance(c, SendMessage))
+        assert "Проекты Claude Code" in listing.text and ".claude" not in listing.text
+        labels = [b.text for row in listing.reply_markup.inline_keyboard for b in row]
+        assert any(label.startswith("📁 ") and "allowed" in label for label in labels), labels
         h.session.take()
         project_key = encode_project_path(str(allowed))
         token = h.ctx.tokens.put(project_key)
         await h.callback(ProjCb(action="open", token=token).pack())
-        assert any("fix-tests" in t for t in h.session.texts(EditMessageText))
+        chats = next(c for c in h.session.calls if isinstance(c, EditMessageText))
+        assert any("fix-tests" in btn.text for row in chats.reply_markup.inline_keyboard for btn in row)
+        assert SESSION_ID[:8] not in chats.text
         h.session.take()
         await h.callback(SessCb(action="open", sid=SESSION_ID).pack())
         report = h.session.texts(EditMessageText)
-        assert report and "Почини тесты" in report[0] and "$1.25" in report[0]
+        assert report and "Почини тесты" in report[0] and "~$1.25" in report[0]
+        assert SESSION_ID not in report[0] and "Затронутые файлы" not in report[0]
         h.session.take()
 
         # 5. Resume that session -> state switches to --resume.
@@ -63,10 +69,12 @@ def test_full_bot_flow(harness_factory, tmp_path: Path) -> None:
         calls = h.session.take()
         sent = [c.text for c in calls if isinstance(c, SendMessage)]
         edits = [c.text for c in calls if isinstance(c, EditMessageText)]
-        assert sent[0].startswith("⏳")
-        assert any("Готово" in e for e in edits), edits
-        answer = next(c for c in calls if isinstance(c, SendMessage) and c.parse_mode is None)
+        assert sent[0].startswith("⚪ <b>Запуск Claude</b>")
+        assert any("Claude работает" in e or "Запуск Claude" in e for e in edits), edits
+        answer = run_cards(calls)[0]
         assert "echo: Проверь проект" in answer.text and f"--resume {SESSION_ID}" in answer.text
+        assert answer.html.startswith("✦ <b>") and "<blockquote" in answer.html
+        assert any(isinstance(c, DeleteMessage) for c in calls)  # the progress card is replaced
         assert not h.ctx.runner.active_runs
         run_id = next(iter(h.ctx.runner._finished))
 
@@ -109,9 +117,9 @@ def test_full_bot_flow(harness_factory, tmp_path: Path) -> None:
         panel = h.session.take()
         mode_msg = next(c for c in panel if isinstance(c, SendMessage))
         labels = [b.text for row in mode_msg.reply_markup.inline_keyboard for b in row]
-        assert "✅ 🔓 Skip Permissions (Full MCP & Bash)" in labels and "🔒 Restricted Tools" in labels
-        assert "✅ ♾ Без лимитов (Auto)" in labels
-        assert "💵 Эконом ($2 / 15 ходов)" in labels and "🚀 Pro ($15 / 80 ходов)" in labels
+        assert "✅ 🔓 Полный доступ" in labels and "🔒 Ограниченный" in labels
+        assert "✅ ♾ Auto" in labels and "💵 Эконом $2" in labels and "🚀 Pro $15" in labels
+        assert not any(label in labels for label in ("💬 Сессии", "📁 Файлы", "📊 Лимиты", "⚙️ Настройки"))
         await h.callback(ModeCb(action="perm_restricted").pack())
         await h.callback(ModeCb(action="lim_economy").pack())
         assert not h.ctx.state.skip_permissions and h.ctx.state.limit_profile.value == "economy"
@@ -122,9 +130,8 @@ def test_full_bot_flow(harness_factory, tmp_path: Path) -> None:
         await h.text("DENY открой браузер и собери слайды")
         await h.drain()
         calls = h.session.take()
-        final = [c.text for c in calls if isinstance(c, EditMessageText)][-1]
-        assert "Отклонено разрешений: 2 (Bash, mcp__playwright__browser_run_code_unsafe)" in final
-        answer = next(c for c in calls if isinstance(c, SendMessage) and c.parse_mode is None)
+        answer = run_cards(calls)[0]
+        assert "Отклонено разрешений: 2 (Bash, mcp__playwright__browser_run_code_unsafe)" in answer.text
         buttons = [b for row in answer.reply_markup.inline_keyboard for b in row]
         retry = next(b for b in buttons if b.text == "🔓 Повторить без ограничений (--resume)")
         denied_run = h.ctx.runner.get(RunCb.unpack(retry.callback_data).run_id)
@@ -133,7 +140,7 @@ def test_full_bot_flow(harness_factory, tmp_path: Path) -> None:
         await h.callback(retry.callback_data)
         await h.drain()
         calls = h.session.take()
-        answer = next(c for c in calls if isinstance(c, SendMessage) and c.parse_mode is None)
+        answer = run_cards(calls)[0]
         assert "--dangerously-skip-permissions" in answer.text and f"--resume {SESSION_ID}" in answer.text
         assert "--allowedTools" not in answer.text and "--max-budget-usd" not in answer.text
         assert "--max-turns" not in answer.text and "Исходная задача" in answer.text
@@ -144,8 +151,8 @@ def test_full_bot_flow(harness_factory, tmp_path: Path) -> None:
         await h.text("BUDGET большой рефакторинг")
         await h.drain()
         calls = h.session.take()
-        final = [c.text for c in calls if isinstance(c, EditMessageText)][-1]
-        assert "Ошибка" in final and "лимит бюджета" in final
+        final = run_cards(calls)[0]
+        assert final.html.startswith("🔴") and "Ошибка" in final.text and "лимит бюджета" in final.text
         offer = next(c for c in calls if isinstance(c, SendMessage) and c.reply_markup is not None
                      and any(b.text.startswith("🔓 Повторить") for row in c.reply_markup.inline_keyboard for b in row))
         assert offer is not None

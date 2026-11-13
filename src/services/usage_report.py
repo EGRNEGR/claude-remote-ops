@@ -1,4 +1,8 @@
-"""HTML rendering of the usage dashboard (Telegram parse_mode=HTML, every message < 4096 chars)."""
+"""HTML rendering of the usage dashboard (Telegram parse_mode=HTML, every message < 4096 chars).
+
+Main screen = the essentials (quota bars, today's spend, the chat's cost and cache); per-model tokens,
+cache statistics and the "what burns the limits" diagnostics sit in expandable quotes.
+"""
 
 from __future__ import annotations
 
@@ -14,9 +18,10 @@ from src.services.usage_tracker import (
     TopItem,
     UsageSummary,
 )
-from src.utils.text import TG_SAFE_LIMIT, esc, esc_fit, truncate
+from src.ui import theme
+from src.ui.formatter import fit_html
+from src.utils.text import TG_SAFE_LIMIT, esc, esc_fit, plural, truncate
 
-BAR_WIDTH = 20
 DAY_BAR_WIDTH = 10
 WEEKDAYS = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
 
@@ -50,18 +55,6 @@ def fmt_span(seconds: float) -> str:
     return f"{secs}с"
 
 
-def progress_bar(percent: float, width: int = BAR_WIDTH) -> str:
-    """`████▌░░░` with half-cell precision, clamped to 0-100%."""
-    cells = max(0.0, min(100.0, percent)) / 100 * width
-    full = int(cells)
-    half = cells - full >= 0.5 and full < width
-    return "█" * full + ("▌" if half else "") + "░" * (width - full - (1 if half else 0))
-
-
-def severity(percent: float) -> str:
-    return "🔴" if percent >= 90 else "🟠" if percent >= 70 else "🟢"
-
-
 def _local(ts: float) -> datetime:
     return datetime.fromtimestamp(ts).astimezone()
 
@@ -75,51 +68,79 @@ def _utc_offset() -> str:
 
 
 def reset_text(resets_at: float | None, now: float) -> str:
+    """`Сброс в 13:00 · через 3ч 20м` (plain text)."""
     if resets_at is None:
-        return "время сброса неизвестно"
+        return "Время сброса неизвестно"
     when = _local(resets_at)
     left = resets_at - now
-    stamp = when.strftime("%H:%M") if when.date() == _local(now).date() else when.strftime("%d.%m в %H:%M")
-    prefix = "Сброс в " if when.date() == _local(now).date() else "Сброс "
+    today = when.date() == _local(now).date()
+    stamp = when.strftime("%H:%M") if today else when.strftime("%d.%m в %H:%M")
     tail = f"через {fmt_span(left)}" if left > 0 else "уже должен был пройти, обновите"
-    return f"{prefix}{stamp} ({tail})"
+    return f"Сброс {'в ' if today else ''}{stamp} · {tail}"
 
 
-def _window_block(title: str, window: QuotaWindow | None, now: float) -> list[str]:
-    if window is None:
-        return [f"<b>{title}</b>", "<i>нет данных от API</i>"]
+def quota_value(window: QuotaWindow) -> str:
+    """`▰▰▰▱▱▱▱▱▱▱▱▱ <b>35%</b> 🟢`."""
     pct = window.utilization
-    return [
-        f"<b>{title}</b>",
-        f"<code>{progress_bar(pct)}</code> <b>{pct:.0f}%</b> {severity(pct)}",
-        f"🔄 {reset_text(window.resets_at, now)}",
-    ]
+    return f"{theme.bar(pct)} <b>{pct:.0f}%</b> {theme.level_dot(pct)}"
+
+
+def _window_block(label: str, window: QuotaWindow | None, now: float) -> str:
+    if window is None:
+        return theme.lines(theme.section(label), "<i>нет данных от API</i>")
+    return theme.lines(theme.section(label), quota_value(window), theme.meta(reset_text(window.resets_at, now)))
 
 
 def render_quota(result: QuotaResult | None, now: float | None = None, enabled: bool = True) -> str:
     now = time.time() if now is None else now
     if not enabled:
-        return "<i>📊 Живые квоты выключены (USAGE_QUOTA_ENABLED=false)</i>"
+        return theme.meta("Живые квоты выключены (USAGE_QUOTA_ENABLED=false)")
     snap = result.snapshot if result else None
     if snap is None:
         reason = result.error if result and result.error else "нет данных"
-        return f"<b>📊 Квоты подписки</b>\n⚠️ Не удалось получить: {esc(reason)}"
-    lines = _window_block("⏳ Текущая сессия (окно 5 ч)", snap.session, now)
-    lines.append("")
-    lines += _window_block("📅 Неделя (все модели)", snap.week, now)
-    for key, title in EXTRA_WINDOWS.items():
-        if key in snap.extra:
-            w = snap.extra[key]
-            lines.append(f"{title}: <code>{progress_bar(w.utilization, 10)}</code> {w.utilization:.0f}%")
+        return theme.lines(theme.section("Квоты подписки"), f"{theme.DOT_ERROR} Не удалось получить: {esc(reason)}")
+    blocks = [_window_block("Сессия · окно 5 ч", snap.session, now), _window_block("Неделя · все модели", snap.week, now)]
+    extra = [
+        theme.item(f"{esc(title)}: {theme.bar(snap.extra[key].utilization, 8)} {snap.extra[key].utilization:.0f}%")
+        for key, title in EXTRA_WINDOWS.items() if key in snap.extra
+    ]
     stamp = _local(snap.fetched_at).strftime("%H:%M:%S")
-    plan = f" · подписка {esc(snap.subscription)}" if snap.subscription else ""
+    plan = f"подписка {snap.subscription}" if snap.subscription else None
     if result is not None and result.live:
-        lines.append(f"<i>🟢 Живые данные API · {stamp}{plan}</i>")
+        source = theme.meta(f"{theme.DOT_OK} живые данные API", stamp, plan)
     else:
-        age = fmt_span(now - snap.fetched_at)
         reason = esc_fit(result.error, 200) if result and result.error else "нет связи"
-        lines.append(f"<i>⚠️ Живой запрос не удался ({reason}). Снимок от {stamp} ({age} назад)</i>")
-    return "\n".join(lines)
+        source = theme.meta_html(
+            f"{theme.DOT_BUSY} живой запрос не удался ({reason})",
+            f"Снимок от {stamp} ({fmt_span(now - snap.fetched_at)} назад)",
+        )
+    return theme.join_blocks(*blocks, theme.lines(*extra), source)
+
+
+def quota_rows(result: QuotaResult | None, now: float | None = None) -> list[str]:
+    """Compact rows for /status: `◈ Лимит 5 ч: ▰▰▱… <b>35%</b> 🟢 · сброс в 13:00 · через 3ч`."""
+    now = time.time() if now is None else now
+    snap = result.snapshot if result else None
+    if snap is None:
+        reason = result.error if result and result.error else "нет данных"
+        return [f"{theme.MARK_SECTION} Лимиты: <b>недоступны</b> <i>· {esc_fit(reason, 200)}</i>"]
+    rows = []
+    for label, window in (("Лимит 5 ч", snap.session), ("Неделя", snap.week)):
+        if window is None:
+            continue
+        reset = f" <i>· {esc(reset_text(window.resets_at, now).lower())}</i>" if window.resets_at else ""
+        rows.append(f"{theme.MARK_SECTION} {label}: {quota_value(window)}{reset}")
+    if result is not None and not result.live:
+        rows.append(theme.meta(f"снимок от {_local(snap.fetched_at).strftime('%H:%M')}"))
+    return rows
+
+
+def spend_row(summary: UsageSummary | None) -> str:
+    """`◈ Расход сегодня: <b>$4.13</b> · 7 дней $276.12` for /status."""
+    if summary is None:
+        return theme.field("Расход", "недоступен")
+    return (f"{theme.MARK_SECTION} Расход сегодня: <b>{fmt_usd(summary.today.cost)}</b> "
+            f"<i>· 7 дней {fmt_usd(summary.week.cost)}</i>")
 
 
 def render_tokens(t: Tokens) -> str:
@@ -127,86 +148,89 @@ def render_tokens(t: Tokens) -> str:
             f"{fmt_tokens(t.cache_write)} запись")
 
 
+def _cache_state(view: SessionView) -> str:
+    cache = view.cache
+    ttl = "1h" if cache.ttl_sec == TTL_1H else "5m"
+    if cache.idle_sec is None:
+        return "🧊 Кэш: запросов еще не было"
+    if cache.warm:
+        return f"🔥 Кэш тёплый еще {fmt_span(cache.ttl_left_sec)} ({ttl} TTL): продолжать сейчас выгодно"
+    return (f"❄️ Кэш остыл (простой {fmt_span(cache.idle_sec)}): следующий запрос перезапишет "
+            f"~{fmt_tokens(cache.rewrite_tokens)} токенов")
+
+
 def render_session(view: SessionView | None, now: float | None = None, selected: bool = True) -> str:
     now = time.time() if now is None else now
     if view is None:
-        return "<b>💬 Сессия</b>\n<i>Нет данных: выберите чат в 📂 Сессии</i>"
-    title = f" «{esc_fit(view.title, 60)}»" if view.title else ""
+        return theme.lines(theme.section("Чат"), theme.meta("Нет данных: выберите чат в 💬 Сессии"))
     origin = "выбранный чат" if selected else "последний активный чат"
-    lines = [f"<b>💬 Сессия</b>{title} <code>{esc(view.session_id[:8])}</code> <i>({origin})</i>"]
-    parts = [f"💵 <b>{fmt_usd(view.cost)}</b>"]
-    if view.api_ms is not None:
-        parts.append(f"⚙️ API {fmt_span(view.api_ms / 1000)}")
-    if view.wall_ms is not None:
-        parts.append(f"🕰 {fmt_span(view.wall_ms / 1000)}")
-    lines.append(" · ".join(parts))
-    lines.append(f"✏️ +{view.lines_added} / -{view.lines_removed} строк кода")
-    for model in view.models[:4]:
-        lines.append(f"🤖 {esc(model.model)}: {render_tokens(model.tokens)} ({fmt_usd(model.cost)})")
+    name = f" «{esc_fit(view.title, 60)}»" if view.title else ""
+    head = f"{theme.section('Чат')}{name} <i>· {origin}</i>"
     cache = view.cache
+    summary = f"<b>{fmt_usd(view.cost)}</b>{theme.SEP}контекст {fmt_tokens(cache.context_tokens)} токенов"
     misses = len(cache.misses)
-    lines.append(
-        f"🗄 Кэш промптов: {cache.requests} запр. · {cache.hit_share:.0%} входа из кэша · "
-        f"{misses} {'промах' if misses == 1 else 'промахов' if misses == 0 or misses >= 5 else 'промаха'}"
+    details = []
+    timing = []
+    if view.api_ms is not None:
+        timing.append(f"API {fmt_span(view.api_ms / 1000)}")
+    if view.wall_ms is not None:
+        timing.append(f"всего {fmt_span(view.wall_ms / 1000)}")
+    if timing:
+        details.append(f"{theme.BULLET} Время: " + theme.SEP.join(timing))
+    details.append(f"{theme.BULLET} Код: +{view.lines_added} / −{view.lines_removed} строк")
+    for model in view.models[:4]:
+        label = theme.model_name(model.model) or model.model
+        details.append(f"{theme.BULLET} {esc(label)}: {render_tokens(model.tokens)} ({fmt_usd(model.cost)})")
+    details.append(
+        f"{theme.BULLET} Кэш промптов: {cache.requests} запр. · {cache.hit_share:.0%} входа из кэша · "
+        f"{misses} {plural(misses, 'промах', 'промаха', 'промахов')}"
     )
     if cache.misses:
         last = cache.misses[-1]
-        lines.append(
-            f"   последний {fmt_span(now - last.ts)} назад: {esc(last.cause)}, "
+        details.append(
+            f"{theme.BULLET} Последний промах {fmt_span(now - last.ts)} назад: {esc(last.cause)}, "
             f"перезаписано {fmt_tokens(last.recached_tokens)} токенов"
         )
-    ttl = "1h" if cache.ttl_sec == TTL_1H else "5m"
-    if cache.idle_sec is None:
-        lines.append("🧊 Кэш: запросов еще не было")
-    elif cache.warm:
-        lines.append(
-            f"🔥 Кэш тёплый (осталось {fmt_span(cache.ttl_left_sec)} до сброса {ttl} TTL): продолжать чат сейчас выгодно"
-        )
-    else:
-        lines.append(
-            f"❄️ Кэш остыл (простой {fmt_span(cache.idle_sec)}): следующий запрос перезапишет "
-            f"~{fmt_tokens(cache.rewrite_tokens)} токенов в кэш"
-        )
-    lines.append(f"📏 Текущий контекст чата: {fmt_tokens(cache.context_tokens)} токенов")
     if view.compacts:
-        last_compact = view.compacts[-1]
-        lines.append(
-            f"🧹 Последнее сжатие {fmt_span(now - last_compact.ts)} назад: "
-            f"{fmt_tokens(last_compact.pre_tokens)} → {fmt_tokens(last_compact.post_tokens)}"
+        compact = view.compacts[-1]
+        details.append(
+            f"{theme.BULLET} Сжатие {fmt_span(now - compact.ts)} назад: "
+            f"{fmt_tokens(compact.pre_tokens)} → {fmt_tokens(compact.post_tokens)}"
         )
-    return "\n".join(lines)
+    return theme.lines(head, summary, esc(_cache_state(view)), theme.quote("\n".join(details)))
 
 
 def render_costs(s: UsageSummary) -> str:
-    week_avg = s.week.cost / 7
-    lines = [
-        "<b>💵 Расходы</b> <i>(по ценам API, часовой пояс ПК)</i>",
-        f"Сегодня: <b>{fmt_usd(s.today.cost)}</b> · {s.today.requests} запр. · {s.today.sessions} сесс.",
-        f"Вчера: {fmt_usd(s.yesterday.cost)} · {s.yesterday.requests} запр.",
-        f"7 дней: <b>{fmt_usd(s.week.cost)}</b> (в среднем {fmt_usd(week_avg)}/день)",
-        f"30 дней: {fmt_usd(s.month.cost)} · Всё время: {fmt_usd(s.all_time.cost)}",
+    d = s.diagnostics
+    head = f"{theme.section('Расход')} <i>· по ценам API, часовой пояс ПК</i>"
+    main = theme.SEP.join([
+        f"Сегодня <b>{fmt_usd(s.today.cost)}</b>",
+        f"7 дней <b>{fmt_usd(s.week.cost)}</b>",
+        f"30 дней {fmt_usd(s.month.cost)}",
+    ])
+    details = [
+        f"{theme.BULLET} Сегодня: {s.today.requests} запр. · {s.today.sessions} сесс.",
+        f"{theme.BULLET} Вчера: {fmt_usd(s.yesterday.cost)} · {s.yesterday.requests} запр.",
+        f"{theme.BULLET} В среднем за 7 дней: {fmt_usd(s.week.cost / 7)}/день",
+        f"{theme.BULLET} Всё время: {fmt_usd(s.all_time.cost)}",
     ]
     if s.unpriced_models:
-        lines.append(f"<i>Нет цен для: {esc_fit(', '.join(s.unpriced_models), 200)} (не учтены)</i>")
-    return "\n".join(lines)
-
-
-def render_diagnostics(s: UsageSummary) -> str:
-    d = s.diagnostics
-    lines = ["<b>🔍 Что расходует лимиты (24 ч)</b>"]
+        details.append(f"{theme.BULLET} Нет цен для: {esc_fit(', '.join(s.unpriced_models), 200)} (не учтены)")
+    details += ["", "<b>Что расходует лимиты (24 ч)</b>"]
     if not d.requests:
-        lines.append("<i>За сутки запросов не было</i>")
-        return "\n".join(lines)
-    icon = "⚠️" if d.heavy_share >= 0.5 else "ℹ️"
-    lines.append(
-        f"{icon} {d.heavy_share:.0%} запросов с контекстом &gt;{fmt_tokens(d.threshold)} токенов "
-        f"({d.heavy_requests} из {d.requests}, {d.heavy_cost_share:.0%} стоимости)"
-    )
-    if d.model_shares:
-        lines.append("🤖 Модели: " + " · ".join(f"{esc(name)} {share:.0%}" for name, share in d.model_shares[:4]))
-    if d.heavy_share >= 0.5:
-        lines.append("💡 Длинный контекст дорог: 🧹 сожмите чат или начните 🆕 чистую сессию")
-    return "\n".join(lines)
+        details.append("<i>За сутки запросов не было</i>")
+    else:
+        details.append(
+            f"{theme.BULLET} {d.heavy_share:.0%} запросов с контекстом &gt;{fmt_tokens(d.threshold)} токенов "
+            f"({d.heavy_requests} из {d.requests}, {d.heavy_cost_share:.0%} стоимости)"
+        )
+        if d.model_shares:
+            shares = theme.SEP.join(
+                f"{esc(theme.model_name(name) or name)} {share:.0%}" for name, share in d.model_shares[:4]
+            )
+            details.append(f"{theme.BULLET} Модели: {shares}")
+    tip = theme.item("💡 Длинный контекст дорог: 🧹 сожмите чат или начните 🆕 чистый") if d.heavy_share >= 0.5 else ""
+    return theme.lines(head, main, tip, theme.quote("\n".join(details)))
 
 
 def render_dashboard(
@@ -215,24 +239,12 @@ def render_dashboard(
 ) -> str:
     now = time.time() if now is None else now
     stamp = _local(now).strftime("%d.%m %H:%M")
-    blocks = [
-        f"📊 <b>Расход и лимиты Claude</b> · {stamp} ({_utc_offset()})",
+    return fit_html(theme.join_blocks(
+        theme.lines(theme.title("Лимиты и расход"), theme.meta(stamp, _utc_offset())),
         render_quota(quota, now, quota_enabled),
         render_session(view, now, selected),
         render_costs(summary),
-        render_diagnostics(summary),
-    ]
-    return fit_message("\n\n".join(blocks))
-
-
-def fit_message(text: str, limit: int = TG_SAFE_LIMIT) -> str:
-    """Trim whole lines from the end so HTML tags are never cut in the middle."""
-    if len(text) <= limit:
-        return text
-    lines = text.split("\n")
-    while lines and len("\n".join(lines)) > limit - 2:
-        lines.pop()
-    return "\n".join(lines) + "\n…"
+    ), TG_SAFE_LIMIT)
 
 
 def day_label(day: DayStats) -> str:
@@ -247,54 +259,43 @@ def render_days(summary: UsageSummary, n: int) -> str:
         filled = round(d.cost / peak * DAY_BAR_WIDTH) if peak > 0 else 0
         if d.cost > 0 and filled == 0:
             filled = 1
-        bar = "▰" * filled + "▱" * (DAY_BAR_WIDTH - filled)
+        bar = theme.BAR_ON * filled + theme.BAR_OFF * (DAY_BAR_WIDTH - filled)
         rows.append(f"{day_label(d)} {bar} {fmt_usd(d.cost):>9} {d.requests:>4} запр.")
     total = sum(d.cost for d in days)
     tokens = Tokens()
     for d in days:
         tokens.add(d.tokens)
     active = [d for d in days if d.requests]
-    lines = [f"📅 <b>Расходы по дням: {n} дн.</b>", "<pre>" + esc("\n".join(rows)) + "</pre>"]
-    lines.append(f"Итого: <b>{fmt_usd(total)}</b> · в среднем {fmt_usd(total / n)}/день · активных дней: {len(active)}")
+    facts = [f"Итого: <b>{fmt_usd(total)}</b> · в среднем {fmt_usd(total / n)}/день · активных дней: {len(active)}"]
     if active:
         top = max(active, key=lambda d: d.cost)
-        lines.append(f"Пик: {day_label(top)} · {fmt_usd(top.cost)} · {top.requests} запр.")
-    lines.append(f"Токены: {fmt_tokens(tokens.total)} ({render_tokens(tokens)})")
-    return fit_message("\n".join(lines))
+        facts.append(f"Пик: {day_label(top)} · {fmt_usd(top.cost)} · {top.requests} запр.")
+    facts.append(theme.meta(f"Токены: {fmt_tokens(tokens.total)} ({render_tokens(tokens)})"))
+    return fit_html(theme.join_blocks(
+        theme.lines(theme.title("Расход по дням"), theme.meta(f"последние {n} дн.", "сегодня сверху")),
+        "<pre>" + esc("\n".join(rows)) + "</pre>",
+        theme.lines(*facts),
+    ), TG_SAFE_LIMIT)
 
 
-def _top_lines(title: str, items: list[TopItem], code: bool) -> list[str]:
-    lines = [f"<b>{title}</b>"]
+def _top_lines(label: str, items: list[TopItem], project: bool) -> str:
+    rows = [theme.section(label)]
     if not items:
-        lines.append("<i>нет запусков</i>")
-    for i, item in enumerate(items, 1):
-        label = esc(truncate(item.label, 60))
-        label = f"<code>{label}</code>" if code else f"«{label}»"
-        lines.append(f"{i}. {label}: <b>{fmt_usd(item.cost)}</b> · {item.requests} запр.")
-    return lines
+        rows.append("<i>нет запусков</i>")
+    for i, entry in enumerate(items, 1):
+        name = theme.folder_label(entry.label) if project else entry.label
+        shown = esc(truncate(name, 60))
+        shown = f"<code>{shown}</code>" if project else f"«{shown}»"
+        rows.append(f"{i}. {shown}: <b>{fmt_usd(entry.cost)}</b> · {entry.requests} запр.")
+    return "\n".join(rows)
 
 
 def render_top(projects_7: list[TopItem], chats_7: list[TopItem], projects_30: list[TopItem],
                chats_30: list[TopItem]) -> str:
-    lines = ["📁 <b>Самые дорогие проекты и чаты</b>", ""]
-    lines += _top_lines("📁 Проекты · 7 дней", projects_7, code=True)
-    lines.append("")
-    lines += _top_lines("💬 Чаты · 7 дней", chats_7, code=False)
-    lines.append("")
-    lines += _top_lines("📁 Проекты · 30 дней", projects_30, code=True)
-    lines.append("")
-    lines += _top_lines("💬 Чаты · 30 дней", chats_30, code=False)
-    return fit_message("\n".join(lines))
-
-
-def status_line(quota: QuotaResult | None, summary: UsageSummary) -> str:
-    """Compact line for /status: `📊 Квоты: 5ч 5% · Нед 97% | 💵 Сегодня: $4.13 (7д: $276.12)`."""
-    snap = quota.snapshot if quota else None
-    if snap is not None:
-        five = f"{snap.session.utilization:.0f}%" if snap.session else "?"
-        week = f"{snap.week.utilization:.0f}%" if snap.week else "?"
-        stale = "" if quota and quota.live else " (снимок)"
-        quotas = f"📊 Квоты: 5ч {five} · Нед {week}{stale}"
-    else:
-        quotas = "📊 Квоты: н/д"
-    return f"{quotas} | 💵 Сегодня: {fmt_usd(summary.today.cost)} (7д: {fmt_usd(summary.week.cost)})"
+    return fit_html(theme.join_blocks(
+        theme.lines(theme.title("Самые дорогие проекты и чаты"), theme.meta("по ценам API")),
+        _top_lines("Проекты · 7 дней", projects_7, project=True),
+        _top_lines("Чаты · 7 дней", chats_7, project=False),
+        _top_lines("Проекты · 30 дней", projects_30, project=True),
+        _top_lines("Чаты · 30 дней", chats_30, project=False),
+    ), TG_SAFE_LIMIT)

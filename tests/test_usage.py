@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
 from conftest import write_jsonl
+from tg_harness import run_cards
 
 from src.keyboards.inline import BTN_USAGE, UsageCb
 from src.services.pricing import normalize_model_id, request_cost
@@ -17,13 +18,14 @@ from src.services.reasoning import ReasoningEffort
 from src.services.quota import QuotaClient, QuotaResult, parse_usage_response
 from src.services.state import RunMode
 from src.services.usage_report import (
-    fit_message,
     fmt_tokens,
-    progress_bar,
+    quota_rows,
     render_dashboard,
     render_days,
-    status_line,
+    spend_row,
 )
+from src.ui.formatter import fit_html, tg_size
+from src.ui.theme import bar
 from src.services.usage_tracker import TTL_1H, TTL_5M, Tokens, UsageTracker
 from src.utils.winpath import IS_WINDOWS
 
@@ -363,11 +365,11 @@ def test_quota_client_live_cache_and_fallbacks(tmp_path: Path) -> None:
 
 def test_formatting_helpers() -> None:
     assert [fmt_tokens(n) for n in (580, 315_300, 40_200_000)] == ["580", "315.3k", "40.2m"]
-    assert progress_bar(0) == "░" * 20 and progress_bar(100) == "█" * 20 and progress_bar(150) == "█" * 20
-    assert progress_bar(99) == "█" * 19 + "▌" and len(progress_bar(37)) == 20
+    assert bar(0) == "▱" * 12 and bar(100) == "▰" * 12 and bar(150) == "▰" * 12
+    assert bar(1) == "▰" + "▱" * 11 and bar(50, 10) == "▰" * 5 + "▱" * 5 and len(bar(37)) == 12
     long_text = "\n".join(f"<b>строка {i}</b>" for i in range(1000))
-    fitted = fit_message(long_text)
-    assert len(fitted) <= 4000 and fitted.endswith("…") and fitted.count("<b>") == fitted.count("</b>")
+    fitted = fit_html(long_text)
+    assert tg_size(fitted) <= 4000 and fitted.endswith("…") and fitted.count("<b>") == fitted.count("</b>")
 
 
 def test_dashboard_text(projects: Path) -> None:
@@ -378,16 +380,19 @@ def test_dashboard_text(projects: Path) -> None:
     t = refreshed(make_tracker(projects))
     quota = QuotaResult(parse_usage_response(USAGE_JSON, NOW, "pro"), live=True)
     text = render_dashboard(quota, t.summary(), t.session_view(S1), True, now=NOW)
-    assert "<b>99%</b> 🔴" in text and "<b>85%</b> 🟠" in text
-    assert "Сброс в 20:00 (через 8ч 0м)" in text or "Сброс в" in text
+    assert "<b>99%</b> 🔴" in text and "<b>85%</b> 🟡" in text
+    assert "Сброс в" in text
     assert "&lt;script&gt;&amp;" in text and "<script>" not in text
-    assert "🔥 Кэш тёплый" in text and "📏 Текущий контекст чата: 201.0k" in text
-    assert "&gt;150.0k" in text and len(text) < 4000
+    assert "🔥 Кэш тёплый" in text and "контекст 201.0k токенов" in text
+    assert "&gt;150.0k" in text and tg_size(text) < 4000
+    assert S1[:8] not in text and "<blockquote expandable>" in text  # details are collapsed
     stale = QuotaResult(quota.snapshot, live=False, error="сеть: ClientConnectorError")
     assert "Снимок от" in render_dashboard(stale, t.summary(), None, False, now=NOW + 600)
-    line = status_line(quota, t.summary())
-    assert line.startswith("📊 Квоты: 5ч 99% · Нед 85% | 💵 Сегодня: $")
-    assert status_line(None, t.summary()).startswith("📊 Квоты: н/д")
+    rows = quota_rows(quota, now=NOW)
+    assert rows[0].startswith("◈ Лимит 5 ч: ") and "<b>99%</b> 🔴" in rows[0]
+    assert rows[1].startswith("◈ Неделя: ") and "<b>85%</b> 🟡" in rows[1]
+    assert "недоступны" in quota_rows(None)[0]
+    assert spend_row(t.summary()).startswith("◈ Расход сегодня: <b>$")
 
 
 # ---------- Telegram flow ----------
@@ -419,30 +424,29 @@ def test_usage_flow(harness_factory, tmp_path: Path) -> None:
         for command in ("/usage", "/cost", "/stats"):
             await h.text(command)
             msg = next(c for c in h.session.take() if isinstance(c, SendMessage))
-            assert "Расход и лимиты Claude" in msg.text and "<b>99%</b>" in msg.text
+            assert "Лимиты и расход" in msg.text and "<b>99%</b>" in msg.text
             assert "«Отчет по лимитам»" in msg.text and "выбранный чат" in msg.text
             buttons = [b.text for row in msg.reply_markup.inline_keyboard for b in row]
-            assert buttons == ["🔄 Обновить", "📅 По дням (7д / 30д)", "📁 По проектам и чатам",
-                               "🧹 Сжать контекст (/compact)", "🆕 Начать чистую сессию"]
+            assert buttons == ["🔄 Обновить", "📅 По дням", "🏆 Топ", "🧹 Сжать контекст", "🆕 Чистый чат"]
 
-        for action, marker in (("days7", "Расходы по дням: 7 дн."), ("days30", "Расходы по дням: 30 дн."),
-                               ("top", "Самые дорогие проекты"), ("refresh", "Расход и лимиты Claude")):
+        for action, marker in (("days7", "последние 7 дн."), ("days30", "последние 30 дн."),
+                               ("top", "Самые дорогие проекты"), ("refresh", "Лимиты и расход")):
             await h.callback(UsageCb(action=action).pack())
             calls = h.session.take()
             assert not any(isinstance(c, SendMessage) for c in calls)
             assert marker in next(c for c in calls if isinstance(c, EditMessageText)).text
 
-        # /status: compact line + button.
+        # /status: compact quota rows; 📊 Лимиты lives in the reply keyboard, not under the message.
         await h.text("/status")
         msg = next(c for c in h.session.take() if isinstance(c, SendMessage))
-        assert "📊 Квоты: 5ч 99% · Нед 85% | 💵 Сегодня: $" in msg.text
-        assert BTN_USAGE in [b.text for row in msg.reply_markup.inline_keyboard for b in row]
+        assert "◈ Лимит 5 ч:" in msg.text and "<b>99%</b> 🔴" in msg.text and "◈ Расход сегодня:" in msg.text
+        assert BTN_USAGE not in [b.text for row in msg.reply_markup.inline_keyboard for b in row]
 
         # 🆕 clean session: next prompt starts a new chat in the same folder.
         await h.callback(UsageCb(action="newchat").pack())
         calls = h.session.take()
         assert h.ctx.state.run_mode is RunMode.NEW and h.ctx.state.active_cwd == allowed
-        assert any(isinstance(c, SendMessage) and "Чистая сессия" in c.text for c in calls)
+        assert any(isinstance(c, SendMessage) and "Чистый чат" in c.text for c in calls)
 
     asyncio.run(scenario())
 
@@ -460,9 +464,9 @@ def test_compact_button_runs_compact_in_session(harness_factory, tmp_path: Path)
         calls = h.session.take()
         answers = [c.text for c in calls if isinstance(c, AnswerCallbackQuery) and c.text]
         assert "🧹 Запускаю /compact" in answers
-        edits = [c.text for c in calls if isinstance(c, EditMessageText)]
-        assert any("🧹 Контекст сжат: 349 129 → 13 187 токенов" in e for e in edits), edits
-        answer = next(c.text for c in calls if isinstance(c, SendMessage) and c.parse_mode is None)
+        card = run_cards(calls)[0]
+        assert "🧹 Контекст сжат: 349 129 → 13 187 токенов" in card.text, card.text
+        answer = card.text
         assert f"--resume {S1}" in answer and "--effort" not in answer  # no ultrathink appended to /compact
         assert h.ctx.state.active_session_id == S1
 
@@ -482,7 +486,7 @@ def test_compact_refuses_without_session(harness_factory, tmp_path: Path) -> Non
         await h.text("/usage")
         msg = next(c for c in h.session.take() if isinstance(c, SendMessage))
         assert "Нет данных" in msg.text and "Не удалось получить" in msg.text  # no credentials in tests
-        assert "🧹 Сжать контекст (/compact)" not in [b.text for row in msg.reply_markup.inline_keyboard for b in row]
+        assert "🧹 Сжать контекст" not in [b.text for row in msg.reply_markup.inline_keyboard for b in row]
 
     asyncio.run(scenario())
 

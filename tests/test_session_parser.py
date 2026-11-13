@@ -81,7 +81,12 @@ def test_listing_and_full_report(tmp_path: Path) -> None:
         assert len(html) <= 4000
         for tag in ("b", "code", "blockquote", "i"):
             assert len(re.findall(f"<{tag}[ >]", html)) == html.count(f"</{tag}>")
-        assert "src\\app.py" in html and "PS&gt; Get-ChildItem" in html
+        # The card keeps the essentials only: no file lists, shell commands, session ids or cache paths.
+        assert "src\\app.py" not in html and "Get-ChildItem" not in html and "pytest -q" not in html
+        assert report.session_id not in html and "C--" not in html
+        assert "Затронутые файлы" not in html and "Команды терминала" not in html
+        assert html.startswith("✦ <b>fix-tests</b>") and "~$1.25" in html and "Opus 5.5" in html
+        assert "<b>Запрос:</b> <i>Почини тесты в проекте</i>" in html and "<blockquote" in html
         md = render_report_markdown(report)
         assert "```powershell" in md and "fix-tests" in md
 
